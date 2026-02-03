@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: stashjar-postgres
+    environment:
+      POSTGRES_USER: stashjar
+      POSTGRES_PASSWORD: stashjar
+      POSTGRES_DB: stashjar
+    ports:
+      - "5432:5432"
+    volumes:
+      - stashjar_pg:/var/lib/postgresql/data
+
+volumes:
+  stashjar_pg:

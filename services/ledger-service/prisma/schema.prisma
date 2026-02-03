@@ -1,0 +1,310 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum AccountType {
+  USER_STASH
+  PENDING_DEPOSIT
+  PENDING_WITHDRAW
+  EXTERNAL_CLEARING
+  TREASURY_USDC
+  FEES_REVENUE
+}
+
+enum EntryType {
+  DEPOSIT_INITIATED
+  DEPOSIT_SETTLED
+  WITHDRAW_REQUESTED
+  WITHDRAW_PAID
+  YIELD_ACCRUED
+  TREASURY_FUNDED
+  FEE_CHARGED
+  REVERSAL
+}
+
+enum UserTier {
+  NORMIE
+  CURIOUS
+  POWER
+  DEV
+}
+
+enum PaymentType {
+  DEPOSIT
+  WITHDRAW
+}
+
+enum PaymentStatus {
+  CREATED
+  PROCESSING
+  SETTLED
+  FAILED
+  CANCELED
+}
+
+enum ChallengeStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELED
+}
+
+enum OnchainActionType {
+  VAULT_DEPOSIT
+  VAULT_WITHDRAW_REQUEST
+  VAULT_REDEEM
+}
+
+enum OnchainStatus {
+  CREATED
+  SUBMITTED
+  CONFIRMED
+  FAILED
+}
+
+model User {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  accounts         Account[]
+  paymentIntents   PaymentIntent[]
+  challenges       UserChallenge[]
+  yieldAllocations YieldAllocation[]
+  flagOverrides    UserFlagOverride[]
+  tier             UserTier @default(NORMIE)
+  flags            Json?
+  wallet           UserWallet?
+  vaultPosition    VaultPosition?
+  onchainActions   OnchainAction[]
+}
+
+model Account {
+  id        String      @id @default(uuid())
+  createdAt DateTime    @default(now())
+
+  type      AccountType
+  currency  String      @default("USD")
+
+  // nullable for "system" accounts
+  userId    String?
+  user      User?       @relation(fields: [userId], references: [id])
+
+  lines     JournalLine[]
+
+  @@index([userId, type])
+}
+
+model JournalEntry {
+  id             String     @id @default(uuid())
+  createdAt      DateTime   @default(now())
+  occurredAt     DateTime   @default(now())
+
+  idempotencyKey String     @unique
+  type           EntryType
+
+  // flexible metadata: provider refs, challenge ids, notes
+  metadata      Json?
+
+  lines          JournalLine[]
+}
+
+model JournalLine {
+  id        String       @id @default(uuid())
+  createdAt DateTime     @default(now())
+
+  entryId   String
+  entry     JournalEntry @relation(fields: [entryId], references: [id])
+
+  accountId String
+  account   Account      @relation(fields: [accountId], references: [id])
+
+  // signed cents: + increases balance (for our convention below)
+  amountCents Int
+
+  memo      String?
+
+  @@index([entryId])
+  @@index([accountId])
+}
+
+model PaymentIntent {
+  id            String        @id @default(uuid())
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  userId        String
+  user          User          @relation(fields: [userId], references: [id])
+
+  type          PaymentType
+  status        PaymentStatus @default(CREATED)
+
+  amountCents   Int
+  currency      String        @default("USD")
+
+  provider      String?       // e.g. "stripe", "ach_provider"
+  providerRef   String?       // provider payment id
+  idempotencyKey String       @unique
+
+  // Links to ledger entries when created
+  initiatedEntryId String?
+  settledEntryId   String?
+  reversedEntryId  String?
+
+  metadata      Json?
+
+  onchainActions OnchainAction[]
+}
+
+model ChallengeTemplate {
+  id           String          @id @default(uuid())
+  createdAt    DateTime        @default(now())
+  slug         String          @unique
+  name         String
+  defaultRules Json
+  challenges   UserChallenge[]
+}
+
+model UserChallenge {
+  id         String            @id @default(uuid())
+  createdAt  DateTime          @default(now())
+  userId     String
+  user       User              @relation(fields: [userId], references: [id])
+  templateId String?
+  template   ChallengeTemplate? @relation(fields: [templateId], references: [id])
+  name       String
+  status     ChallengeStatus   @default(ACTIVE)
+  // for schedule-based challenges
+  startDate  DateTime
+  rules      Json
+  settings   Json?
+  // scheduler materialization
+  nextRunAt  DateTime?
+  lastRunAt  DateTime?
+  state      Json?
+  events     ChallengeEvent[]
+}
+
+model ChallengeEvent {
+  id              String        @id @default(uuid())
+  createdAt       DateTime      @default(now())
+  userChallengeId String
+  userChallenge   UserChallenge @relation(fields: [userChallengeId], references: [id])
+  scheduledFor    DateTime
+  idempotencyKey  String        @unique
+  // deposit details decided by rules
+  amountCents     Int
+  result          String? // "DEPOSIT_CREATED" | "NOOP" | "FAILED"
+  paymentIntentId String?
+  metadata        Json?
+}
+
+model YieldRun {
+  id              String   @id @default(uuid())
+  createdAt       DateTime @default(now())
+  runKey          String   @unique
+  periodStart     DateTime
+  periodEnd       DateTime
+  totalYieldCents Int
+  status          String   @default("CREATED") // CREATED | POSTED | FAILED
+  metadata        Json?
+  allocations     YieldAllocation[]
+}
+
+model YieldAllocation {
+  id                 String   @id @default(uuid())
+  createdAt          DateTime @default(now())
+  yieldRunId         String
+  yieldRun           YieldRun @relation(fields: [yieldRunId], references: [id])
+  userId             String
+  user               User     @relation(fields: [userId], references: [id])
+  userStashAccountId String
+  amountCents        Int
+  idempotencyKey     String   @unique
+}
+
+model FeatureFlag {
+  key            String @id
+  description    String
+  defaultEnabled Boolean @default(false)
+  tierPolicies   TierPolicy[]
+  overrides      UserFlagOverride[]
+}
+
+model TierPolicy {
+  id      String   @id @default(uuid())
+  tier    UserTier
+  flagKey String
+  enabled Boolean  @default(false)
+
+  flag    FeatureFlag @relation(fields: [flagKey], references: [key])
+
+  @@unique([tier, flagKey])
+}
+
+model UserFlagOverride {
+  id      String   @id @default(uuid())
+  userId  String
+  flagKey String
+  enabled Boolean
+
+  user    User        @relation(fields: [userId], references: [id])
+  flag    FeatureFlag @relation(fields: [flagKey], references: [key])
+
+  @@unique([userId, flagKey])
+}
+
+model UserWallet {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id])
+
+  address   String
+}
+
+model OnchainAction {
+  id             String           @id @default(uuid())
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  userId         String
+  user           User             @relation(fields: [userId], references: [id])
+
+  type           OnchainActionType
+  status         OnchainStatus    @default(CREATED)
+
+  chain          String
+  txHash         String?
+  blockNumber    Int?
+
+  paymentIntentId String?
+  paymentIntent   PaymentIntent?  @relation(fields: [paymentIntentId], references: [id])
+
+  requestId      String?
+
+  idempotencyKey String           @unique
+  metadata       Json?
+}
+
+model VaultPosition {
+  id             String   @id @default(uuid())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  userId         String   @unique
+  user           User     @relation(fields: [userId], references: [id])
+
+  vaultAddress   String
+  shares         String   // bigint as string
+  totalUsdcMicros String  // bigint as string
+
+  // cached mark-to-market value (optional)
+  currentValueUsdcMicros String?
+  lastMarkedAt           DateTime?
+}

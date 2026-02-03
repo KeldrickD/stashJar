@@ -1,0 +1,31 @@
+{
+  "name": "onchain-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "allocate": "tsx src/index.ts allocate",
+    "reconcile": "tsx src/index.ts reconcile",
+    "withdraw-request": "tsx src/index.ts withdraw-request",
+    "redeem": "tsx src/index.ts redeem",
+    "mark": "tsx src/index.ts mark",
+    "dev:allocate": "pnpm allocate",
+    "dev:reconcile": "pnpm reconcile",
+    "dev:withdraw-request": "pnpm withdraw-request",
+    "dev:redeem": "pnpm redeem",
+    "dev:mark": "pnpm mark",
+    "worker": "tsx src/worker.ts"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.3.0",
+    "dotenv": "^17.2.3",
+    "pg": "^8.18.0",
+    "viem": "^2.9.18",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "tsx": "^4.7.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,68 @@
+TABLE_NAME | COLUMN_NAME | DATA_TYPE
+--------------------------------------
+Account | createdAt | timestamp without time zone
+Account | currency | text
+Account | id | text
+Account | type | USER-DEFINED
+Account | userId | text
+ChallengeEvent | amountCents | integer
+ChallengeEvent | createdAt | timestamp without time zone
+ChallengeEvent | id | text
+ChallengeEvent | idempotencyKey | text
+ChallengeEvent | metadata | jsonb
+ChallengeEvent | paymentIntentId | text
+ChallengeEvent | result | text
+ChallengeEvent | scheduledFor | timestamp without time zone
+ChallengeEvent | userChallengeId | text
+ChallengeTemplate | createdAt | timestamp without time zone
+ChallengeTemplate | defaultRules | jsonb
+ChallengeTemplate | id | text
+ChallengeTemplate | name | text
+ChallengeTemplate | slug | text
+JournalEntry | createdAt | timestamp without time zone
+JournalEntry | id | text
+JournalEntry | idempotencyKey | text
+JournalEntry | metadata | jsonb
+JournalEntry | occurredAt | timestamp without time zone
+JournalEntry | type | USER-DEFINED
+JournalLine | accountId | text
+JournalLine | amountCents | integer
+JournalLine | createdAt | timestamp without time zone
+JournalLine | entryId | text
+JournalLine | id | text
+JournalLine | memo | text
+PaymentIntent | amountCents | integer
+PaymentIntent | createdAt | timestamp without time zone
+PaymentIntent | currency | text
+PaymentIntent | id | text
+PaymentIntent | idempotencyKey | text
+PaymentIntent | initiatedEntryId | text
+PaymentIntent | metadata | jsonb
+PaymentIntent | provider | text
+PaymentIntent | providerRef | text
+PaymentIntent | reversedEntryId | text
+PaymentIntent | settledEntryId | text
+PaymentIntent | status | USER-DEFINED
+PaymentIntent | type | USER-DEFINED
+PaymentIntent | updatedAt | timestamp without time zone
+PaymentIntent | userId | text
+User | createdAt | timestamp without time zone
+User | id | text
+UserChallenge | createdAt | timestamp without time zone
+UserChallenge | id | text
+UserChallenge | lastRunAt | timestamp without time zone
+UserChallenge | name | text
+UserChallenge | nextRunAt | timestamp without time zone
+UserChallenge | rules | jsonb
+UserChallenge | startDate | timestamp without time zone
+UserChallenge | status | USER-DEFINED
+UserChallenge | templateId | text
+UserChallenge | userId | text
+_prisma_migrations | applied_steps_count | integer
+_prisma_migrations | checksum | character varying
+_prisma_migrations | finished_at | timestamp with time zone
+_prisma_migrations | id | character varying
+_prisma_migrations | logs | text
+_prisma_migrations | migration_name | character varying
+_prisma_migrations | rolled_back_at | timestamp with time zone
+_prisma_migrations | started_at | timestamp with time zone
