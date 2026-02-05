@@ -5,6 +5,7 @@ import { useRouter, usePathname } from "next/navigation";
 import { api, TodayCard, TodayBanner } from "@/lib/api";
 import { getUserId, setUserId as saveUserId, clearUserId } from "@/lib/session";
 import { ApplyMissedSavesBanner } from "@/components/ApplyMissedSavesBanner";
+import { PushReminderToggle } from "@/components/PushReminderToggle";
 import { TodayCardRenderer } from "@/components/TodayCardRenderer";
 import { sortTodayCards } from "@/lib/todayOrder";
 
@@ -287,6 +288,10 @@ export default function Home() {
         </div>
         <p className="text-sm opacity-70">Tier: {tier}</p>
       </header>
+
+      {userId && (
+        <PushReminderToggle />
+      )}
 
       <section className="rounded-xl border p-5 space-y-3">
         <div className="text-sm opacity-70">Stash Balance</div>

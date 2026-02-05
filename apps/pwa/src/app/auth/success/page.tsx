@@ -16,7 +16,7 @@ export default function AuthSuccessPage() {
   const returnTo = sanitizeReturnTo(searchParams.get("returnTo"));
 
   useEffect(() => {
-    const t = setTimeout(() => router.replace(returnTo), 1000);
+    const t = setTimeout(() => router.replace(returnTo), 800);
     return () => clearTimeout(t);
   }, [router, returnTo]);
 

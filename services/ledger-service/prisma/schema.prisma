@@ -83,6 +83,7 @@ model User {
   vaultPosition    VaultPosition?
   onchainActions   OnchainAction[]
   sessions         Session[]
+  pushSubscriptions PushSubscription[]
 
   // Streaks (daily completion = at least one challenge save that UTC day)
   currentStreakDays  Int     @default(0)
@@ -120,6 +121,23 @@ model Session {
 
   @@index([userId])
   @@index([expiresAt])
+}
+
+model PushSubscription {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint   String
+  p256dh     String
+  auth       String
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime  @default(now())
+  revokedAt  DateTime?
+  userAgent  String?
+
+  @@unique([userId, endpoint])
+  @@index([userId])
+  @@index([revokedAt])
 }
 
 model Account {
@@ -226,6 +244,7 @@ model UserChallenge {
   lastRunAt  DateTime?
   state      Json?
   events     ChallengeEvent[]
+  reminders  ChallengeReminder[]
 }
 
 model ChallengeEvent {
@@ -240,6 +259,19 @@ model ChallengeEvent {
   result          String? // "DEPOSIT_CREATED" | "NOOP" | "FAILED"
   paymentIntentId String?
   metadata        Json?
+}
+
+// One row per (userChallenge, due window, channel): at most one reminder per due window per channel (push vs email recap)
+model ChallengeReminder {
+  id              String   @id @default(uuid())
+  userChallengeId String
+  userChallenge   UserChallenge @relation(fields: [userChallengeId], references: [id], onDelete: Cascade)
+  dueWindowKey    String   // e.g. "2026-02-05", "2026-02-02" (week anchor)
+  channel         String   @default("PUSH") // PUSH | EMAIL
+  sentAt          DateTime @default(now())
+
+  @@unique([userChallengeId, dueWindowKey, channel])
+  @@index([userChallengeId])
 }
 
 model YieldRun {

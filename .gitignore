@@ -19,6 +19,7 @@ next-env.d.ts
 contracts/**/artifacts/
 contracts/**/cache/
 contracts/**/typechain-types/
+contracts/**/gasReporterOutput.json
 
 # Prisma generated
 **/generated/

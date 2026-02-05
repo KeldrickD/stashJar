@@ -261,4 +261,20 @@ export const api = {
 
   commitPending: (userId: string, limit = 200) =>
     req<any>("POST", `/users/${userId}/challenges/commit-pending?limit=${limit}`, {}),
+
+  getVapidPublicKey: () =>
+    fetch(`${API}/push/vapid-public`, { credentials: "include" }).then(async (r) => {
+      if (!r.ok) throw new Error("Push not configured");
+      const d = await r.json();
+      return d.vapidPublicKey as string;
+    }),
+
+  getPushStatus: () =>
+    req<{ enabled: boolean; subscriptionCount: number }>("GET", "/push/status"),
+
+  pushSubscribe: (subscription: { endpoint: string; keys: { p256dh: string; auth: string } }) =>
+    req<{ ok: boolean }>("POST", "/push/subscribe", subscription),
+
+  pushUnsubscribe: (endpoint: string) =>
+    req<{ ok: boolean }>("POST", "/push/unsubscribe", { endpoint }),
 };

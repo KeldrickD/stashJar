@@ -6,7 +6,10 @@ import { PrismaClient, AccountType, EntryType, UserTier } from "./generated/clie
 import { PrismaPg } from "@prisma/adapter-pg";
 import { z } from "zod";
 import { resolveFlags } from "./lib/tier";
+import { getChallengeDueWindow } from "./lib/challengeDue";
 import { isAddress } from "viem";
+import { sendMagicLinkEmail as sendMagicLinkEmailResend } from "./email/resend";
+import webpush from "web-push";
 
 const EnvSchema = z.object({
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
@@ -15,15 +18,47 @@ const EnvSchema = z.object({
   AUTH_PEPPER: z.string().min(1, "AUTH_PEPPER is required").optional(), // optional so dev can run without; auth routes will 503 if missing
   AUTH_TOKEN_TTL_MIN: z.string().optional().transform((s) => (s ? Number(s) : 15)),
   SESSION_TTL_DAYS: z.string().optional().transform((s) => (s ? Number(s) : 30)),
+  SESSION_RENEW_WINDOW_DAYS: z.string().optional().transform((s) => (s ? Number(s) : 7)),
   APP_ORIGIN: z.string().url().optional().or(z.literal("")),
   API_ORIGIN: z.string().url().optional().or(z.literal("")),
   // Dev: allow X-User-Id header to stand in for session (no cookie needed)
   NODE_ENV: z.string().optional(),
+  // Email (Resend)
+  RESEND_API_KEY: z.string().optional(),
+  EMAIL_FROM: z.string().optional(),
+  EMAIL_REPLY_TO: z.string().optional(),
+  EMAIL_PROVIDER: z.string().optional(),
+  // Web Push (VAPID)
+  VAPID_PUBLIC_KEY: z.string().optional(),
+  VAPID_PRIVATE_KEY: z.string().optional(),
+  VAPID_SUBJECT: z.string().optional(),
+  PUSH_ENABLED: z.string().optional().transform((s) => s === "true" || s === "1"),
 });
 const env = EnvSchema.safeParse(process.env);
 if (!env.success) {
   console.error("Env validation failed:", env.error.flatten());
   process.exit(1);
+}
+const isProd = (env.data.NODE_ENV || "").toLowerCase() === "production";
+const emailProvider = (env.data.EMAIL_PROVIDER || "").toLowerCase();
+if (isProd && emailProvider === "resend") {
+  if (!env.data.RESEND_API_KEY?.trim() || !env.data.EMAIL_FROM?.trim()) {
+    console.error(
+      "In production with EMAIL_PROVIDER=resend, RESEND_API_KEY and EMAIL_FROM are required",
+    );
+    process.exit(1);
+  }
+}
+
+const VAPID_PUBLIC_KEY = env.data.VAPID_PUBLIC_KEY?.trim() ?? "";
+const VAPID_PRIVATE_KEY = env.data.VAPID_PRIVATE_KEY?.trim() ?? "";
+const PUSH_ENABLED = env.data.PUSH_ENABLED ?? false;
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(
+    env.data.VAPID_SUBJECT ?? "mailto:push@stashjar.local",
+    VAPID_PUBLIC_KEY,
+    VAPID_PRIVATE_KEY,
+  );
 }
 
 const adapter = new PrismaPg({
@@ -68,6 +103,8 @@ app.addHook("preHandler", async (request: any, reply) => {
 
 const BUILD_TIMESTAMP = new Date().toISOString().slice(0, 19) + "Z";
 const runDueLocks = new Map<string, Promise<any | null>>();
+/** Single-flight per session id so parallel requests don't mint multiple sessions on renewal */
+const renewLocks = new Map<string, Promise<string>>();
 
 function stableStringify(value: unknown): string {
   if (value === null) return "null";
@@ -119,7 +156,10 @@ function getClientIP(req: any): string {
 
 // --- Auth primitives (magic link + session) ---
 const AUTH_TOKEN_TTL_MIN = env.data.AUTH_TOKEN_TTL_MIN ?? 15;
+/** Per-email cooldown: at most one magic link per email per this many seconds */
+const MAGIC_LINK_COOLDOWN_SEC = 30;
 const SESSION_TTL_DAYS = env.data.SESSION_TTL_DAYS ?? 30;
+const SESSION_RENEW_WINDOW_DAYS = env.data.SESSION_RENEW_WINDOW_DAYS ?? 7;
 const AUTH_PEPPER = env.data.AUTH_PEPPER ?? "";
 const APP_ORIGIN = (env.data.APP_ORIGIN || "").replace(/\/$/, "");
 const API_ORIGIN = (env.data.API_ORIGIN || "").replace(/\/$/, "");
@@ -210,29 +250,44 @@ async function requireAuth(request: any, reply: any): Promise<void> {
     flags: session.user.flags,
   };
 
-  // Sliding renewal: if session expires in < 7 days, mint new session and set cookie
-  const RENEW_IF_EXPIRES_IN_DAYS = 7;
+  // Sliding renewal: if session expires within the window, mint new session and set cookie (single-flight per session)
   const now = new Date();
-  const msLeft = session.expiresAt.getTime() - now.getTime();
-  const daysLeft = msLeft / (24 * 60 * 60 * 1000);
-  if (daysLeft < RENEW_IF_EXPIRES_IN_DAYS) {
-    const rawSession = generateRawSession();
-    const newSessionHash = hashWithPepper(rawSession);
-    const newExpiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000);
-    await prisma.session.create({
-      data: {
-        userId: session.user.id,
-        sessionHash: newSessionHash,
-        expiresAt: newExpiresAt,
-        ip: getClientIP(request),
-        userAgent: (request.headers["user-agent"] as string) ?? undefined,
-      },
-    });
-    await prisma.session.update({
-      where: { id: session.id },
-      data: { revokedAt: now },
-    });
-    setSessionCookie(reply, rawSession, SESSION_TTL_DAYS);
+  const renewIfExpiresBefore = new Date(
+    Date.now() + SESSION_RENEW_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+  );
+  if (session.expiresAt <= renewIfExpiresBefore) {
+    let lock = renewLocks.get(session.id);
+    if (!lock) {
+      lock = (async (): Promise<string> => {
+        try {
+          const newRawSession = generateRawSession();
+          const newSessionHash = hashWithPepper(newRawSession);
+          const newExpiresAt = new Date(
+            Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000,
+          );
+          await prisma.session.create({
+            data: {
+              userId: session.user.id,
+              sessionHash: newSessionHash,
+              expiresAt: newExpiresAt,
+              ip: getClientIP(request),
+              userAgent: (request.headers["user-agent"] as string) ?? undefined,
+            },
+          });
+          await prisma.session.update({
+            where: { id: session.id },
+            data: { revokedAt: now },
+          });
+          return newRawSession;
+        } finally {
+          renewLocks.delete(session.id);
+        }
+      })();
+      renewLocks.set(session.id, lock);
+    }
+    const newRawSession = await lock;
+    setSessionCookie(reply, newRawSession, SESSION_TTL_DAYS);
+    reply.header("X-Session-Renewed", "1");
   }
 }
 
@@ -868,6 +923,17 @@ app.post("/auth/start", async (req, reply) => {
     app.log.info({ email }, "auth/start: AUTH_PEPPER not set, skipping magic link");
     return reply.send({ ok: true });
   }
+  const cooldownCutoff = new Date(Date.now() - MAGIC_LINK_COOLDOWN_SEC * 1000);
+  const recent = await prisma.authToken.findFirst({
+    where: { email },
+    orderBy: { createdAt: "desc" },
+    select: { createdAt: true },
+  });
+  if (recent && recent.createdAt > cooldownCutoff) {
+    const emailDomain = email.includes("@") ? email.split("@")[1] : "";
+    app.log.info({ reason: "cooldown", emailDomain }, "auth/start: per-email cooldown");
+    return reply.send({ ok: true });
+  }
   const rawToken = generateRawToken();
   const tokenHash = hashWithPepper(rawToken);
   const expiresAt = new Date(Date.now() + AUTH_TOKEN_TTL_MIN * 60 * 1000);
@@ -884,18 +950,26 @@ app.post("/auth/start", async (req, reply) => {
   });
   const baseUrl = API_ORIGIN || `http://localhost:${env.data.PORT}`;
   const callbackUrl = `${baseUrl}/auth/callback?token=${encodeURIComponent(rawToken)}`;
-  if (IS_DEV || !process.env.EMAIL_PROVIDER) {
+  const useResend =
+    (process.env.EMAIL_PROVIDER || "").toLowerCase() === "resend" &&
+    process.env.RESEND_API_KEY?.trim() &&
+    process.env.EMAIL_FROM?.trim();
+  if (IS_DEV) {
     app.log.info({ email, link: callbackUrl }, "magic link (dev)");
-  } else {
-    await sendMagicLinkEmail(email, callbackUrl);
+  }
+  if (useResend) {
+    const result = await sendMagicLinkEmailResend(email, callbackUrl);
+    if (!result.ok) {
+      const requestId = (req as any).id ?? crypto.randomBytes(4).toString("hex");
+      const emailDomain = email.includes("@") ? email.split("@")[1] : "";
+      app.log.error(
+        { requestId, emailDomain, error: result.error },
+        "auth/start: magic link email send failed",
+      );
+    }
   }
   return reply.send({ ok: true });
 });
-
-async function sendMagicLinkEmail(email: string, link: string): Promise<void> {
-  // TODO: wire Resend/Postmark/SendGrid/SES; for now no-op when not dev
-  app.log.info({ email, link }, "sendMagicLinkEmail (no provider configured)");
-}
 
 app.get("/auth/callback", async (req, reply) => {
   const token = (req.query as any)?.token as string;
@@ -984,6 +1058,105 @@ app.get("/auth/me", async (req, reply) => {
     tier: session.user.tier,
     flags: resolveFlags(session.user.tier as any, session.user.flags),
   });
+});
+
+// --- Push subscriptions (auth required; userId from session) ---
+const PushSubscribeSchema = z.object({
+  endpoint: z.string().min(1),
+  keys: z.object({ p256dh: z.string().min(1), auth: z.string().min(1) }),
+});
+app.post("/push/subscribe", { preHandler: [requireAuth] }, async (req, reply) => {
+  const user = (req as any).user;
+  if (!user?.id) return reply.code(401).send({ error: "unauthorized" });
+  const parsed = PushSubscribeSchema.safeParse(req.body);
+  if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+  const { endpoint, keys } = parsed.data;
+  const userAgent = (req.headers["user-agent"] as string) ?? undefined;
+  const now = new Date();
+  await prisma.pushSubscription.upsert({
+    where: {
+      userId_endpoint: { userId: user.id, endpoint },
+    },
+    create: {
+      userId: user.id,
+      endpoint,
+      p256dh: keys.p256dh,
+      auth: keys.auth,
+      lastUsedAt: now,
+      userAgent,
+    },
+    update: {
+      p256dh: keys.p256dh,
+      auth: keys.auth,
+      lastUsedAt: now,
+      revokedAt: null,
+      userAgent,
+    },
+  });
+  return reply.send({ ok: true });
+});
+
+const PushUnsubscribeSchema = z.object({ endpoint: z.string().min(1) });
+app.post("/push/unsubscribe", { preHandler: [requireAuth] }, async (req, reply) => {
+  const user = (req as any).user;
+  if (!user?.id) return reply.code(401).send({ error: "unauthorized" });
+  const parsed = PushUnsubscribeSchema.safeParse(req.body);
+  if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+  const now = new Date();
+  await prisma.pushSubscription.updateMany({
+    where: { userId: user.id, endpoint: parsed.data.endpoint },
+    data: { revokedAt: now },
+  });
+  return reply.send({ ok: true });
+});
+
+app.get("/push/status", { preHandler: [requireAuth] }, async (req, reply) => {
+  const user = (req as any).user;
+  if (!user?.id) return reply.code(401).send({ error: "unauthorized" });
+  const subscriptionCount = await prisma.pushSubscription.count({
+    where: { userId: user.id, revokedAt: null },
+  });
+  return reply.send({
+    enabled: PUSH_ENABLED && !!VAPID_PUBLIC_KEY,
+    subscriptionCount,
+  });
+});
+
+app.get("/push/vapid-public", async (_req, reply) => {
+  if (!VAPID_PUBLIC_KEY) return reply.code(503).send({ error: "push_not_configured" });
+  return reply.send({ vapidPublicKey: VAPID_PUBLIC_KEY });
+});
+
+app.post("/push/test", { preHandler: [requireAuth] }, async (req, reply) => {
+  if (!IS_DEV) return reply.code(403).send({ error: "test_push_only_in_dev" });
+  const user = (req as any).user;
+  if (!user?.id) return reply.code(401).send({ error: "unauthorized" });
+  if (!PUSH_ENABLED || !VAPID_PRIVATE_KEY) {
+    return reply.code(503).send({ error: "push_not_configured" });
+  }
+  const subs = await prisma.pushSubscription.findMany({
+    where: { userId: user.id, revokedAt: null },
+    select: { id: true, endpoint: true, p256dh: true, auth: true },
+  });
+  const payload = { title: "My Stash Jar", body: "Push works ✅", deeplink: "/" };
+  let sent = 0;
+  const now = new Date();
+  for (const sub of subs) {
+    const result = await sendPushNotification(
+      { endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth },
+      payload,
+    );
+    if (result.ok) sent++;
+    else if (result.statusCode === 410 || result.statusCode === 404) {
+      await prisma.pushSubscription.update({
+        where: { id: sub.id },
+        data: { revokedAt: now },
+      });
+      app.log.info({ subscriptionId: sub.id, statusCode: result.statusCode }, "push/test: subscription revoked (gone)");
+    }
+  }
+  app.log.info({ userId: user.id, subscriptionCount: subs.length, sent }, "push/test: sent test notification");
+  return reply.send({ ok: true, sent, subscriptionCount: subs.length });
 });
 
 // Utility: list a user's accounts
@@ -2388,6 +2561,130 @@ async function buildTodayCards(
   });
   return { cards, banner };
 }
+
+/** Message hints for push worker (no need to know every challenge type). */
+function reminderMessageHints(
+  name: string,
+  templateSlug: string | null,
+  expectedAction: "draw" | "roll" | "input" | "save",
+): { title: string; body: string; deeplink: string } {
+  const baseTitle = name || "Your challenge";
+  const deeplink = "/";
+  switch (expectedAction) {
+    case "roll":
+      return { title: baseTitle, body: "Tap to roll and save today.", deeplink };
+    case "input":
+      return { title: baseTitle, body: "Tap to log today's save.", deeplink };
+    case "draw":
+      return { title: baseTitle, body: "Draw an envelope to save.", deeplink };
+    case "save":
+      return { title: baseTitle, body: "Complete this week's save.", deeplink };
+    default:
+      return { title: baseTitle, body: "Tap to complete your save.", deeplink };
+  }
+}
+
+/** Challenge-aware reminder eligibility: due, not completed for this window, reminder not yet sent. Used by push job. */
+export type RemindableChallenge = {
+  userChallengeId: string;
+  dueWindowKey: string;
+  expectedAction: "draw" | "roll" | "input" | "save";
+  name: string;
+  templateSlug: string | null;
+  title: string;
+  body: string;
+  deeplink: string;
+};
+
+async function getRemindableChallenges(
+  userId: string,
+  now: Date,
+): Promise<RemindableChallenge[]> {
+  const dayStart = utcDateOnly(now);
+  const dayEnd = addDaysUtc(dayStart, 1);
+
+  const ucs = await prisma.userChallenge.findMany({
+    where: { userId, status: "ACTIVE" },
+    include: { template: true },
+  });
+
+  const out: RemindableChallenge[] = [];
+
+  for (const uc of ucs) {
+    const rules = (uc.rules as any) ?? {};
+    const templateSlug = (uc.template as any)?.slug ?? null;
+
+    let envelopeDrewToday = false;
+    let envelopeState: { remaining?: number[]; used?: number[] } | null = null;
+    if (templateSlug === "100_envelopes" || rules.type === "envelopes") {
+      const state = (uc.state as { remaining?: number[]; used?: number[] }) ?? null;
+      envelopeState = state;
+      const drawsToday = await prisma.challengeEvent.count({
+        where: {
+          userChallengeId: uc.id,
+          createdAt: { gte: dayStart, lt: dayEnd },
+        },
+      });
+      envelopeDrewToday = drawsToday >= 1;
+    }
+
+    const dueResult = getChallengeDueWindow({
+      templateSlug,
+      rules,
+      startDate: uc.startDate,
+      nowUtc: now,
+      envelopeState,
+      envelopeDrewToday,
+    });
+
+    if (!dueResult.due || !dueResult.dueWindowKey) continue;
+
+    const completed =
+      dueResult.expectedAction === "draw"
+        ? envelopeDrewToday
+        : await prisma.challengeEvent.count({
+            where: {
+              userChallengeId: uc.id,
+              scheduledFor: { gte: dueResult.dueSinceUtc!, lt: dueResult.dueUntilUtc! },
+              paymentIntentId: { not: null },
+            },
+          }) >= 1;
+
+    if (completed) continue;
+
+    const sent = await prisma.challengeReminder.findUnique({
+      where: {
+        userChallengeId_dueWindowKey_channel: {
+          userChallengeId: uc.id,
+          dueWindowKey: dueResult.dueWindowKey,
+          channel: "PUSH",
+        },
+      },
+    });
+    if (sent) continue;
+
+    const hints = reminderMessageHints(uc.name, templateSlug, dueResult.expectedAction);
+    out.push({
+      userChallengeId: uc.id,
+      dueWindowKey: dueResult.dueWindowKey,
+      expectedAction: dueResult.expectedAction,
+      name: uc.name,
+      templateSlug,
+      title: hints.title,
+      body: hints.body,
+      deeplink: hints.deeplink,
+    });
+  }
+
+  return out;
+}
+
+app.get("/users/:userId/challenges/remindable", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
+  const userId = (req.params as any).userId as string;
+  const now = new Date();
+  const list = await getRemindableChallenges(userId, now);
+  return reply.send({ userId, remindable: list });
+});
 
 app.get("/users/:userId/challenges/today", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
   const userId = (req.params as any).userId as string;
@@ -3795,8 +4092,90 @@ app.post("/challenges/:challengeId/events/:eventId/roll", { preHandler: [require
   }
 });
 
+// --- Push reminder job (runs every 15 min when PUSH_ENABLED and VAPID set) ---
+const PUSH_JOB_INTERVAL_MS = 15 * 60 * 1000;
+
+async function sendPushNotification(
+  sub: { endpoint: string; p256dh: string; auth: string },
+  payload: { title: string; body: string; deeplink: string },
+): Promise<{ ok: true } | { ok: false; statusCode: number }> {
+  try {
+    await webpush.sendNotification(
+      {
+        endpoint: sub.endpoint,
+        keys: { p256dh: sub.p256dh, auth: sub.auth },
+      },
+      JSON.stringify(payload),
+      { TTL: 86400 },
+    );
+    return { ok: true };
+  } catch (e: any) {
+    const statusCode = e?.statusCode ?? e?.response?.statusCode ?? 0;
+    return { ok: false, statusCode };
+  }
+}
+
+async function runPushReminderJob(): Promise<void> {
+  if (!PUSH_ENABLED || !VAPID_PRIVATE_KEY) return;
+  const now = new Date();
+  const subs = await prisma.pushSubscription.findMany({
+    where: { revokedAt: null },
+    select: { id: true, userId: true, endpoint: true, p256dh: true, auth: true },
+  });
+  const byUser = new Map<string, typeof subs>();
+  for (const s of subs) {
+    const list = byUser.get(s.userId) ?? [];
+    list.push(s);
+    byUser.set(s.userId, list);
+  }
+  for (const [userId, userSubs] of byUser) {
+    const remindable = await getRemindableChallenges(userId, now);
+    for (const r of remindable) {
+      let sent = false;
+      for (const sub of userSubs) {
+        const result = await sendPushNotification(
+          { endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth },
+          { title: r.title, body: r.body, deeplink: r.deeplink },
+        );
+        if (result.ok) {
+          sent = true;
+        } else if (result.statusCode === 410 || result.statusCode === 404) {
+          await prisma.pushSubscription.update({
+            where: { id: sub.id },
+            data: { revokedAt: now },
+          });
+          app.log.info({ subscriptionId: sub.id, statusCode: result.statusCode }, "push subscription revoked (gone)");
+        }
+      }
+      if (sent) {
+        await prisma.challengeReminder.upsert({
+          where: {
+            userChallengeId_dueWindowKey_channel: {
+              userChallengeId: r.userChallengeId,
+              dueWindowKey: r.dueWindowKey,
+              channel: "PUSH",
+            },
+          },
+          create: {
+            userChallengeId: r.userChallengeId,
+            dueWindowKey: r.dueWindowKey,
+            channel: "PUSH",
+          },
+          update: {},
+        });
+      }
+    }
+  }
+}
+
 const port = Number(process.env.PORT ?? 4001);
-app.listen({ port, host: "0.0.0.0" }).catch((err) => {
+app.listen({ port, host: "0.0.0.0" }).then(() => {
+  if (PUSH_ENABLED && VAPID_PRIVATE_KEY) {
+    setTimeout(runPushReminderJob, 60 * 1000);
+    setInterval(runPushReminderJob, PUSH_JOB_INTERVAL_MS);
+    app.log.info("Push reminder job scheduled (every 15 min)");
+  }
+}).catch((err) => {
   app.log.error(err);
   process.exit(1);
 });
