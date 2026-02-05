@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE "User" ADD COLUMN "currentStreakDays" INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE "User" ADD COLUMN "bestStreakDays" INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE "User" ADD COLUMN "lastStreakDateUtc" TEXT;

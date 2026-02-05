@@ -1,0 +1,1 @@
+ALTER TABLE "AuthToken" ADD COLUMN IF NOT EXISTS "returnTo" TEXT;

@@ -69,6 +69,7 @@ enum OnchainStatus {
 
 model User {
   id        String   @id @default(uuid())
+  email     String?  @unique
   createdAt DateTime @default(now())
 
   accounts         Account[]
@@ -81,6 +82,44 @@ model User {
   wallet           UserWallet?
   vaultPosition    VaultPosition?
   onchainActions   OnchainAction[]
+  sessions         Session[]
+
+  // Streaks (daily completion = at least one challenge save that UTC day)
+  currentStreakDays  Int     @default(0)
+  bestStreakDays     Int     @default(0)
+  lastStreakDateUtc  String? // YYYY-MM-DD
+}
+
+model AuthToken {
+  id         String    @id @default(uuid())
+  email      String
+  tokenHash  String    @unique
+  purpose    String    // "magic_link"
+  returnTo   String?   // path to redirect after login (e.g. /challenges)
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  consumedAt DateTime?
+  ip         String?
+  userAgent  String?
+
+  @@index([email])
+  @@index([expiresAt])
+}
+
+model Session {
+  id          String    @id @default(uuid())
+  userId      String
+  sessionHash String    @unique
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  ip          String?
+  userAgent   String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 model Account {
@@ -197,7 +236,7 @@ model ChallengeEvent {
   scheduledFor    DateTime
   idempotencyKey  String        @unique
   // deposit details decided by rules
-  amountCents     Int
+  amountCents     Int?
   result          String? // "DEPOSIT_CREATED" | "NOOP" | "FAILED"
   paymentIntentId String?
   metadata        Json?

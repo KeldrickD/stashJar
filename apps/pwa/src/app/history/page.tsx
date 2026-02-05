@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter, usePathname } from "next/navigation";
 import { api } from "@/lib/api";
-import { getUserId } from "@/lib/session";
+import { getUserId, setUserId } from "@/lib/session";
 
 function fmt(cents: number) {
   const sign = cents >= 0 ? "+": "-";
@@ -10,19 +11,31 @@ function fmt(cents: number) {
 }
 
 export default function HistoryPage() {
+  const router = useRouter();
+  const pathname = usePathname();
   const [items, setItems] = useState<any[]>([]);
   const [status, setStatus] = useState("");
 
   useEffect(() => {
     (async () => {
-      const userId = getUserId();
-      if (!userId) return;
-      setStatus("Loading…");
-      const res = await api.getTxHistory(userId);
-      setItems(res.transactions ?? []);
-      setStatus("");
+      try {
+        const me = await api.getMe();
+        const uid = me.userId;
+        setUserId(uid);
+        setStatus("Loading…");
+        const res = await api.getTxHistory(uid);
+        setItems(res.transactions ?? []);
+      } catch (e: any) {
+        if (e?.message === "unauthorized") {
+          const returnTo = pathname ? encodeURIComponent(pathname) : "";
+          router.replace(returnTo ? `/login?returnTo=${returnTo}` : "/login");
+          return;
+        }
+      } finally {
+        setStatus("");
+      }
     })();
-  }, []);
+  }, [router, pathname]);
 
   return (
     <main className="mx-auto max-w-xl p-6 space-y-6">

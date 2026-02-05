@@ -1,20 +1,53 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { api } from "@/lib/api";
+import { useRouter, usePathname } from "next/navigation";
+import { api, TodayCard, TodayBanner } from "@/lib/api";
 import { getUserId, setUserId as saveUserId, clearUserId } from "@/lib/session";
+import { ApplyMissedSavesBanner } from "@/components/ApplyMissedSavesBanner";
+import { TodayCardRenderer } from "@/components/TodayCardRenderer";
+import { sortTodayCards } from "@/lib/todayOrder";
 
 function fmt(cents: number) {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+function getResetsInUtc(): string {
+  const now = new Date();
+  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0, 0));
+  const ms = next.getTime() - now.getTime();
+  const totalMins = Math.floor(ms / 60000);
+  const h = Math.floor(totalMins / 60);
+  const m = totalMins % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
 export default function Home() {
+  const router = useRouter();
+  const pathname = usePathname();
   const [userId, setUser] = useState<string | null>(null);
   const [stashAccountId, setStashAccountId] = useState<string | null>(null);
   const [balanceCents, setBalanceCents] = useState<number>(0);
   const [tier, setTier] = useState<string>("NORMIE");
   const [flags, setFlags] = useState<Record<string, boolean>>({});
   const [status, setStatus] = useState<string>("");
+  const [todayCards, setTodayCards] = useState<TodayCard[]>([]);
+  const [todayBanner, setTodayBanner] = useState<TodayBanner | undefined>(undefined);
+  const [todayError, setTodayError] = useState<string | null>(null);
+  const [focusEventId, setFocusEventId] = useState<string | null>(null);
+  const [activeChallenges, setActiveChallenges] = useState<
+    Array<{ userChallengeId: string; name: string; templateSlug: string | null; progress?: string }>
+  >([]);
+  const [streak, setStreak] = useState<{
+    todayCompleted: boolean;
+    currentStreakDays: number;
+    bestStreakDays: number;
+    lastCompletedDateUtc: string | null;
+  } | null>(null);
+  const [prevTodayCompleted, setPrevTodayCompleted] = useState<boolean | null>(null);
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [resetsIn, setResetsIn] = useState<string>("");
 
   const [depositDollars, setDepositDollars] = useState("10");
   const [withdrawDollars, setWithdrawDollars] = useState("5");
@@ -24,29 +57,36 @@ export default function Home() {
     [flags],
   );
 
+  const sortedCards = useMemo(() => sortTodayCards(todayCards), [todayCards]);
+  const doneForToday = Boolean(
+    streak?.todayCompleted && sortedCards.length === 0 && !todayBanner && !todayError,
+  );
+
   async function boot() {
     setStatus("Loading…");
-
-    let uid = getUserId();
-    if (!uid) {
-      const created = await api.createUser();
-      uid = created.userId;
+    try {
+      const me = await api.getMe();
+      const uid = me.userId;
       saveUserId(uid);
+      setUser(uid);
+      const home = await api.getHome(uid);
+      setStashAccountId(home.stashAccountId);
+      setBalanceCents(home.stashBalanceCents);
+      setTier(home.config.tier);
+      setFlags(home.config.flags);
+      setTodayCards(home.today.cards ?? []);
+      setTodayBanner(home.today.banner);
+      setActiveChallenges(home.activeChallenges ?? []);
+      setStreak(home.streak);
+      setPrevTodayCompleted(home.streak.todayCompleted);
+      setTodayError(null);
+      const stored = localStorage.getItem("focusEventId");
+      if (stored) setFocusEventId(stored);
+    } catch {
+      const returnTo = pathname ? encodeURIComponent(pathname) : "";
+      router.replace(returnTo ? `/login?returnTo=${returnTo}` : "/login");
+      return;
     }
-
-    setUser(uid);
-
-    const accounts = await api.getAccounts(uid);
-    const stash = accounts.userAccounts.find((a: any) => a.type === "USER_STASH");
-    setStashAccountId(stash.id);
-
-    const bal = await api.getBalance(stash.id);
-    setBalanceCents(bal.balanceCents ?? 0);
-
-    const f = await api.getFlags(uid);
-    setTier(f.tier);
-    setFlags(f.flags);
-
     setStatus("");
   }
 
@@ -56,9 +96,131 @@ export default function Home() {
     setBalanceCents(bal.balanceCents ?? 0);
   }
 
+  async function refreshTodayCards(uid?: string) {
+    const id = uid ?? userId;
+    if (!id) return;
+    try {
+      setTodayError(null);
+      const res = await api.getTodayCards(id);
+      setTodayCards(res.cards ?? []);
+      setTodayBanner(res.banner);
+      const stored = localStorage.getItem("focusEventId");
+      if (stored) setFocusEventId(stored);
+    } catch (err: any) {
+      setTodayError(err?.message ?? "Failed to load today cards");
+    }
+  }
+
   useEffect(() => {
-    void boot();
-  }, []);
+    let alive = true;
+    (async () => {
+      try {
+        setStatus("Loading…");
+
+        let uid: string | null = null;
+        try {
+          const me = await api.getMe();
+          if (!alive) return;
+          uid = me.userId;
+          saveUserId(uid);
+        } catch {
+          if (!alive) return;
+          const returnTo = pathname ? encodeURIComponent(pathname) : "";
+          router.replace(returnTo ? `/login?returnTo=${returnTo}` : "/login");
+          return;
+        }
+
+        if (!alive) return;
+        setUser(uid);
+
+        try {
+          const home = await api.getHome(uid!);
+          if (!alive) return;
+          setStashAccountId(home.stashAccountId);
+          setBalanceCents(home.stashBalanceCents);
+          setTier(home.config.tier);
+          setFlags(home.config.flags);
+          setTodayCards(home.today.cards ?? []);
+          setTodayBanner(home.today.banner);
+          setActiveChallenges(home.activeChallenges ?? []);
+          setStreak(home.streak);
+          setPrevTodayCompleted(home.streak.todayCompleted);
+          setTodayError(null);
+          const stored = localStorage.getItem("focusEventId");
+          if (stored) setFocusEventId(stored);
+        } catch (err: any) {
+          if (alive) setTodayError(err?.message ?? "Failed to load home");
+          if (alive) setTodayCards([]);
+          if (alive) setTodayBanner(undefined);
+          if (alive) setActiveChallenges([]);
+          if (alive) setStreak(null);
+        }
+
+        setStatus("");
+      } catch (e: any) {
+        if (!alive) return;
+        setStatus(e?.message ?? "Failed to load");
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [router, pathname]);
+
+  useEffect(() => {
+    if (!focusEventId) return;
+    const el = document.getElementById(`card_${focusEventId}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    const timeout = setTimeout(() => {
+      localStorage.removeItem("focusEventId");
+      setFocusEventId(null);
+    }, 2000);
+    return () => clearTimeout(timeout);
+  }, [focusEventId, todayCards]);
+
+  useEffect(() => {
+    if (!toastMsg) return;
+    const t = setTimeout(() => setToastMsg(null), 3000);
+    return () => clearTimeout(t);
+  }, [toastMsg]);
+
+  function maybeShowStreakToast(
+    s: { todayCompleted: boolean; currentStreakDays: number },
+    prevCompleted: boolean | null,
+  ) {
+    // Only when we just flipped to completed this session (first completion today)
+    if (!s.todayCompleted || s.currentStreakDays < 1) return;
+    if (prevCompleted === true) return; // was already completed, don't toast on refresh
+    const todayKey = new Date().toISOString().slice(0, 10);
+    if (typeof sessionStorage !== "undefined" && sessionStorage.getItem(`streakToast_${todayKey}`)) return;
+    setToastMsg("Streak kept ✅");
+    try {
+      sessionStorage.setItem(`streakToast_${todayKey}`, "1");
+    } catch {}
+  }
+
+  async function refreshEverything() {
+    const uid = userId;
+    if (!uid) return;
+    try {
+      const home = await api.getHome(uid);
+      setStashAccountId(home.stashAccountId);
+      setBalanceCents(home.stashBalanceCents);
+      setTier(home.config.tier);
+      setFlags(home.config.flags);
+      setTodayCards(home.today.cards ?? []);
+      setTodayBanner(home.today.banner);
+      setActiveChallenges(home.activeChallenges ?? []);
+      setStreak(home.streak);
+      maybeShowStreakToast(home.streak, prevTodayCompleted);
+      setPrevTodayCompleted(home.streak.todayCompleted);
+      setTodayError(null);
+    } catch {
+      await refresh();
+      await refreshTodayCards();
+    }
+  }
 
   async function doDeposit() {
     if (!userId) return;
@@ -84,15 +246,45 @@ export default function Home() {
     setStatus("");
   }
 
-  async function resetUser() {
+  async function handleLogout() {
+    try {
+      await api.logout();
+    } catch {}
     clearUserId();
-    location.reload();
+    router.replace("/login");
   }
+
+  useEffect(() => {
+    setResetsIn(getResetsInUtc());
+    const interval = setInterval(() => setResetsIn(getResetsInUtc()), 60_000);
+    return () => clearInterval(interval);
+  }, []);
 
   return (
     <main className="mx-auto max-w-xl p-6 space-y-6">
+      {toastMsg && (
+        <div
+          className="fixed top-4 left-1/2 -translate-x-1/2 z-50 rounded-lg bg-black text-white px-4 py-2 text-sm font-medium shadow-lg animate-in fade-in duration-200"
+          role="status"
+        >
+          {toastMsg}
+        </div>
+      )}
       <header className="space-y-1">
-        <h1 className="text-3xl font-bold">My Stash Jar</h1>
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h1 className="text-3xl font-bold">My Stash Jar</h1>
+          {streak && (
+            <div className="text-right text-sm">
+              <span className="font-medium">🔥 {streak.currentStreakDays}-day streak</span>
+              {streak.bestStreakDays > 0 && (
+                <p className="text-xs opacity-70">Best: {streak.bestStreakDays}</p>
+              )}
+              {!streak.todayCompleted && (
+                <p className="text-xs opacity-70 mt-0.5">Save today to keep it alive</p>
+              )}
+            </div>
+          )}
+        </div>
         <p className="text-sm opacity-70">Tier: {tier}</p>
       </header>
 
@@ -101,6 +293,62 @@ export default function Home() {
         <div className="text-4xl font-bold">{fmt(balanceCents)}</div>
         {status && <div className="text-sm opacity-70">{status}</div>}
       </section>
+
+      {todayError && (
+        <section className="rounded-xl border p-5 text-sm text-red-600">
+          {todayError}
+        </section>
+      )}
+
+      {todayBanner && userId && (
+        <ApplyMissedSavesBanner
+          userId={userId}
+          banner={todayBanner}
+          onDone={refreshEverything}
+        />
+      )}
+
+      {doneForToday && (
+        <section className="rounded-xl border border-green-200 bg-green-50/50 p-5 space-y-4">
+          <h2 className="text-xl font-semibold">You&apos;re done for today ✅</h2>
+          <p className="text-sm opacity-80">Your stash is on track. Come back tomorrow.</p>
+          {resetsIn && (
+            <p className="text-xs opacity-70">Resets in {resetsIn}</p>
+          )}
+          {streak && (streak.currentStreakDays > 0 || streak.bestStreakDays > 0) && (
+            <p className="text-sm">
+              🔥 {streak.currentStreakDays}-day streak
+              {streak.bestStreakDays > 0 && ` · Best: ${streak.bestStreakDays}`}
+            </p>
+          )}
+          <div className="flex flex-wrap gap-3 pt-1">
+            <a className="underline text-sm font-medium" href="/history">
+              View activity
+            </a>
+            <a className="underline text-sm font-medium" href="/challenges">
+              Challenges
+            </a>
+          </div>
+        </section>
+      )}
+
+      {userId &&
+        !doneForToday &&
+        sortedCards.map((card, index) => {
+          const eventId = (card as any).eventId;
+          const userChallengeId = (card as any).userChallengeId;
+          const key = `${card.type}_${eventId ?? userChallengeId ?? card.scheduledFor ?? index}`;
+          const id = eventId ? `card_${eventId}` : undefined;
+          const highlight =
+            focusEventId && eventId && focusEventId === eventId
+              ? "ring-2 ring-yellow-400"
+              : "";
+          return (
+            <div key={key} id={id} className={highlight}>
+              <TodayCardRenderer userId={userId} card={card} onDone={refreshEverything} />
+            </div>
+          );
+        })}
 
       <section className="rounded-xl border p-5 space-y-4">
         <h2 className="text-xl font-semibold">Add to Stash</h2>
@@ -133,6 +381,19 @@ export default function Home() {
         </div>
       </section>
 
+      {activeChallenges.length > 0 && (
+        <a
+          href="/challenges"
+          className="block rounded-xl border p-4 text-sm opacity-90 hover:opacity-100 transition-opacity"
+        >
+          <span className="font-medium">Active challenges: </span>
+          {activeChallenges
+            .map((c) => (c.progress ? `${c.name} (${c.progress})` : c.name))
+            .join(", ")}
+          <span className="ml-1">→</span>
+        </a>
+      )}
+
       <section className="rounded-xl border p-5 space-y-3">
         <h2 className="text-xl font-semibold">Challenges</h2>
         <div className="grid grid-cols-1 gap-2">
@@ -158,10 +419,14 @@ export default function Home() {
       )}
 
       <footer className="text-xs opacity-60">
-        User: {userId ?? "…"} •{" "}
-        <button onClick={resetUser} className="underline">
-          Reset local user
-        </button>
+        {userId && (
+          <>
+            User: {userId} •{" "}
+            <button onClick={handleLogout} className="underline">
+              Sign out
+            </button>
+          </>
+        )}
       </footer>
     </main>
   );

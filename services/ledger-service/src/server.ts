@@ -1,16 +1,265 @@
 import "dotenv/config";
 import Fastify from "fastify";
+import cors from "@fastify/cors";
+import crypto from "node:crypto";
 import { PrismaClient, AccountType, EntryType, UserTier } from "./generated/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { z } from "zod";
 import { resolveFlags } from "./lib/tier";
 import { isAddress } from "viem";
 
+const EnvSchema = z.object({
+  DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
+  PORT: z.string().optional().transform((s) => (s ? Number(s) : 4001)),
+  // Auth (magic link + session)
+  AUTH_PEPPER: z.string().min(1, "AUTH_PEPPER is required").optional(), // optional so dev can run without; auth routes will 503 if missing
+  AUTH_TOKEN_TTL_MIN: z.string().optional().transform((s) => (s ? Number(s) : 15)),
+  SESSION_TTL_DAYS: z.string().optional().transform((s) => (s ? Number(s) : 30)),
+  APP_ORIGIN: z.string().url().optional().or(z.literal("")),
+  API_ORIGIN: z.string().url().optional().or(z.literal("")),
+  // Dev: allow X-User-Id header to stand in for session (no cookie needed)
+  NODE_ENV: z.string().optional(),
+});
+const env = EnvSchema.safeParse(process.env);
+if (!env.success) {
+  console.error("Env validation failed:", env.error.flatten());
+  process.exit(1);
+}
+
 const adapter = new PrismaPg({
-  connectionString: process.env.DATABASE_URL!,
+  connectionString: env.data.DATABASE_URL,
 });
 const prisma = new PrismaClient({ adapter });
 const app = Fastify({ logger: true });
+
+await app.register(cors, {
+  origin: env.data.APP_ORIGIN ? [env.data.APP_ORIGIN] : true,
+  credentials: true,
+});
+
+app.addHook("onRequest", async (request: any) => {
+  request._startTime = Date.now();
+});
+
+app.addHook("onResponse", async (request: any, reply, payload) => {
+  const start = request._startTime;
+  if (typeof start === "number") {
+    const durationMs = Date.now() - start;
+    const userId = request.params?.userId ?? null;
+    app.log.info({
+      route: request.routerPath ?? request.url,
+      method: request.method,
+      userId: userId ?? undefined,
+      durationMs,
+      statusCode: reply.statusCode,
+    });
+  }
+});
+
+app.addHook("preHandler", async (request: any, reply) => {
+  const ip = getClientIP(request);
+  if (!checkRateLimit(ip, rateLimitIP, RATE_LIMIT_IP)) {
+    return reply.code(429).header("Retry-After", "60").send({
+      error: "rate_limit",
+      retryAfterSeconds: 60,
+    });
+  }
+});
+
+const BUILD_TIMESTAMP = new Date().toISOString().slice(0, 19) + "Z";
+const runDueLocks = new Map<string, Promise<any | null>>();
+
+function stableStringify(value: unknown): string {
+  if (value === null) return "null";
+  if (typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return "[" + value.map(stableStringify).join(",") + "]";
+  const keys = Object.keys(value as object).sort();
+  const pairs = keys.map((k) => JSON.stringify(k) + ":" + stableStringify((value as any)[k]));
+  return "{" + pairs.join(",") + "}";
+}
+
+function sha1Hex(str: string): string {
+  return crypto.createHash("sha1").update(str, "utf8").digest("hex");
+}
+
+function weakEtag(prefix: string, body: string): string {
+  return `W/"${prefix}:${sha1Hex(body)}"`;
+}
+
+function ifNoneMatch(req: any): string | null {
+  const v = req.headers["if-none-match"];
+  return typeof v === "string" ? v.trim() : null;
+}
+
+const RATE_WINDOW_MS = 60_000;
+const RATE_LIMIT_IP = 60;
+const RATE_LIMIT_USER_ACTIONS = 30;
+const rateLimitIP = new Map<string, { count: number; resetAt: number }>();
+const rateLimitUser = new Map<string, { count: number; resetAt: number }>();
+
+function checkRateLimit(key: string, map: Map<string, { count: number; resetAt: number }>, limit: number): boolean {
+  const now = Date.now();
+  const cur = map.get(key);
+  if (!cur) {
+    map.set(key, { count: 1, resetAt: now + RATE_WINDOW_MS });
+    return true;
+  }
+  if (now >= cur.resetAt) {
+    map.set(key, { count: 1, resetAt: now + RATE_WINDOW_MS });
+    return true;
+  }
+  if (cur.count >= limit) return false;
+  cur.count += 1;
+  return true;
+}
+
+function getClientIP(req: any): string {
+  return (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ?? req.ip ?? "unknown";
+}
+
+// --- Auth primitives (magic link + session) ---
+const AUTH_TOKEN_TTL_MIN = env.data.AUTH_TOKEN_TTL_MIN ?? 15;
+const SESSION_TTL_DAYS = env.data.SESSION_TTL_DAYS ?? 30;
+const AUTH_PEPPER = env.data.AUTH_PEPPER ?? "";
+const APP_ORIGIN = (env.data.APP_ORIGIN || "").replace(/\/$/, "");
+const API_ORIGIN = (env.data.API_ORIGIN || "").replace(/\/$/, "");
+const IS_DEV = (env.data.NODE_ENV || "").toLowerCase() === "development";
+
+function base64url(bytes: Buffer): string {
+  return bytes.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function hashWithPepper(raw: string): string {
+  if (!AUTH_PEPPER) return ""; // caller must check AUTH_PEPPER before using auth
+  return crypto.createHash("sha256").update(raw + AUTH_PEPPER, "utf8").digest("hex");
+}
+
+function generateRawToken(): string {
+  return base64url(crypto.randomBytes(32));
+}
+
+function generateRawSession(): string {
+  return base64url(crypto.randomBytes(32));
+}
+
+const COOKIE_NAME = "stash_session";
+const COOKIE_OPTS = {
+  httpOnly: true,
+  sameSite: "lax" as const,
+  path: "/",
+  secure: process.env.NODE_ENV === "production",
+};
+
+function setSessionCookie(reply: any, value: string, maxAgeDays: number): void {
+  const parts = [
+    `${COOKIE_NAME}=${encodeURIComponent(value)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    `Max-Age=${maxAgeDays * 24 * 60 * 60}`,
+  ];
+  if (COOKIE_OPTS.secure) parts.push("Secure");
+  reply.header("Set-Cookie", parts.join("; "));
+}
+
+function clearSessionCookie(reply: any): void {
+  reply.header(
+    "Set-Cookie",
+    `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
+  );
+}
+
+function getCookie(request: any, name: string): string | undefined {
+  const raw = request.headers?.cookie;
+  if (typeof raw !== "string") return undefined;
+  const match = new RegExp(`(?:^|;\\s*)${name}=([^;]*)`).exec(raw);
+  return match ? decodeURIComponent(match[1].trim()) : undefined;
+}
+
+async function requireAuth(request: any, reply: any): Promise<void> {
+  const devUserId = IS_DEV && (request.headers["x-user-id"] as string)?.trim();
+  if (devUserId) {
+    const user = await prisma.user.findUnique({
+      where: { id: devUserId },
+      select: { id: true, email: true, tier: true, flags: true },
+    });
+    if (user) {
+      request.user = { id: user.id, email: user.email ?? undefined, tier: user.tier, flags: user.flags };
+      return;
+    }
+  }
+  const rawSession = getCookie(request, COOKIE_NAME);
+  if (!rawSession || typeof rawSession !== "string") {
+    return reply.code(401).send({ error: "unauthorized", message: "No session" });
+  }
+  const sessionHash = hashWithPepper(rawSession);
+  if (!sessionHash) {
+    return reply.code(503).send({ error: "auth_not_configured", message: "AUTH_PEPPER not set" });
+  }
+  const session = await prisma.session.findFirst({
+    where: { sessionHash, revokedAt: null, expiresAt: { gt: new Date() } },
+    include: { user: { select: { id: true, email: true, tier: true, flags: true } } },
+  });
+  if (!session) {
+    return reply.code(401).send({ error: "unauthorized", message: "Invalid or expired session" });
+  }
+  request.user = {
+    id: session.user.id,
+    email: session.user.email ?? undefined,
+    tier: session.user.tier,
+    flags: session.user.flags,
+  };
+
+  // Sliding renewal: if session expires in < 7 days, mint new session and set cookie
+  const RENEW_IF_EXPIRES_IN_DAYS = 7;
+  const now = new Date();
+  const msLeft = session.expiresAt.getTime() - now.getTime();
+  const daysLeft = msLeft / (24 * 60 * 60 * 1000);
+  if (daysLeft < RENEW_IF_EXPIRES_IN_DAYS) {
+    const rawSession = generateRawSession();
+    const newSessionHash = hashWithPepper(rawSession);
+    const newExpiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000);
+    await prisma.session.create({
+      data: {
+        userId: session.user.id,
+        sessionHash: newSessionHash,
+        expiresAt: newExpiresAt,
+        ip: getClientIP(request),
+        userAgent: (request.headers["user-agent"] as string) ?? undefined,
+      },
+    });
+    await prisma.session.update({
+      where: { id: session.id },
+      data: { revokedAt: now },
+    });
+    setSessionCookie(reply, rawSession, SESSION_TTL_DAYS);
+  }
+}
+
+function assertUserIdParam(request: any, reply: any): boolean {
+  const userId = (request.params as any)?.userId;
+  if (!request.user || userId !== request.user.id) {
+    reply.code(403).send({ error: "forbidden", message: "User id does not match session" });
+    return false;
+  }
+  return true;
+}
+
+async function requireUserIdMatch(request: any, reply: any): Promise<void> {
+  if (!assertUserIdParam(request, reply)) return;
+}
+
+const todayCardsCache = new Map<
+  string,
+  { data: { cards: any[]; banner: any }; expiresAt: number }
+>();
+const TODAY_CARDS_CACHE_TTL_MS = 3000;
+
+const weatherCache = new Map<
+  string,
+  { tempF: number; fetchedAtMs: number; provider: string }
+>();
+const weatherFetchCounts = new Map<string, { count: number; dayKey: string }>();
 
 async function getSystemAccountId(type: AccountType) {
   const acc = await prisma.account.findFirst({
@@ -45,6 +294,213 @@ function yyyymmddUtc(d: Date) {
   return iso.replaceAll("-", "");
 }
 
+function toDateStringUtc(d: Date): string {
+  return d.toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
+function utcDateOnly(d: Date) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+function addDaysUtc(d: Date, n: number) {
+  return new Date(d.getTime() + n * 24 * 60 * 60 * 1000);
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function deterministicRoll(params: { userId: string; eventId: string; sides: number }) {
+  const salt = process.env.DICE_SALT ?? "dev_salt";
+  const input = `${salt}:${params.userId}:${params.eventId}`;
+  const hash = crypto.createHash("sha256").update(input).digest("hex");
+  const n = BigInt(`0x${hash}`);
+  return Number(n % BigInt(params.sides)) + 1;
+}
+
+function toTempF(value: number, unit: "F" | "C") {
+  if (unit === "F") return value;
+  return value * (9 / 5) + 32;
+}
+
+async function primeSingleChallengeDue(uc: any, now: Date) {
+  const rules = (uc.rules as any) ?? {};
+  const schedule = rules.schedule ?? {};
+  const settings = (uc.settings as any) ?? {};
+  const autoCommit = settings.autoCommit !== false;
+
+  const dayKey = yyyymmddUtc(now);
+  const eventIdempo = `sched_${uc.id}_${dayKey}`;
+
+  const existing = await prisma.challengeEvent.findUnique({
+    where: { idempotencyKey: eventIdempo },
+  });
+  if (existing) return { created: false, committed: false, eventId: existing.id };
+
+  let amountCents: number | null = null;
+  let metadata: any = {};
+
+  if (rules.type === "weekly_increment") {
+    const weekIndex =
+      Math.floor((now.getTime() - uc.startDate.getTime()) / (7 * 24 * 3600 * 1000)) + 1;
+    amountCents =
+      (rules.week1AmountCents ?? 100) + (weekIndex - 1) * (rules.incrementCents ?? 100);
+    metadata = { weeksSinceStart: weekIndex };
+  } else if (rules.type === "weather_wednesday" || rules.type === "temperature") {
+    amountCents = autoCommit
+      ? Number((rules.amount ?? {}).defaultAmountCents ?? 700) || 700
+      : null;
+    metadata = {
+      weekday: ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"][now.getUTCDay()],
+      inputStatus: "NEEDS_INPUT",
+    };
+  } else if (rules.type === "dice") {
+    metadata = {
+      weekday: ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"][now.getUTCDay()],
+      rollStatus: "NEEDS_ROLL",
+    };
+    amountCents = null;
+  } else {
+    return { created: false, committed: false };
+  }
+
+  const created = await prisma.challengeEvent.create({
+    data: {
+      userChallengeId: uc.id,
+      scheduledFor: now,
+      idempotencyKey: eventIdempo,
+      amountCents,
+      result: "DEPOSIT_SCHEDULED",
+      metadata: metadata as any,
+    } as any,
+  });
+
+  if (autoCommit && amountCents && amountCents > 0) {
+    const res = await commitChallengeEvent({
+      userId: uc.userId,
+      userChallengeId: uc.id,
+      challengeEventId: created.id,
+    });
+    return { created: true, committed: res.status !== "ALREADY_COMMITTED", eventId: created.id };
+  }
+
+  return { created: true, committed: false, eventId: created.id };
+}
+
+function checkWeatherRateLimit(params: { userId: string; dateKey: string }) {
+  const limit = Number(process.env.WEATHER_FETCH_DAILY_LIMIT ?? 10);
+  const key = `${params.userId}:${params.dateKey}`;
+  const existing = weatherFetchCounts.get(key);
+  if (!existing) {
+    weatherFetchCounts.set(key, { count: 1, dayKey: params.dateKey });
+    return { ok: true, remaining: Math.max(0, limit - 1) };
+  }
+  if (existing.dayKey !== params.dateKey) {
+    weatherFetchCounts.set(key, { count: 1, dayKey: params.dateKey });
+    return { ok: true, remaining: Math.max(0, limit - 1) };
+  }
+  if (existing.count >= limit) {
+    return { ok: false, remaining: 0 };
+  }
+  existing.count += 1;
+  return { ok: true, remaining: Math.max(0, limit - existing.count) };
+}
+
+function getWeatherProvider() {
+  return (process.env.WEATHER_PROVIDER ?? "openweather").toLowerCase();
+}
+
+function getWeatherApiKey() {
+  return process.env.WEATHER_API_KEY ?? process.env.OPENWEATHER_API_KEY;
+}
+
+async function resolveOpenWeatherLatLon(params: {
+  zip?: string;
+  query?: string;
+}): Promise<{ lat: number; lon: number }> {
+  const apiKey = getWeatherApiKey();
+  if (!apiKey) throw new Error("OPENWEATHER_API_KEY not set");
+
+  if (params.zip) {
+    const url = new URL("https://api.openweathermap.org/geo/1.0/zip");
+    url.searchParams.set("zip", params.zip);
+    url.searchParams.set("appid", apiKey);
+    const res = await fetch(url.toString());
+    if (!res.ok) throw new Error("Failed to resolve zip");
+    const data: any = await res.json();
+    if (typeof data?.lat !== "number" || typeof data?.lon !== "number") {
+      throw new Error("Invalid zip lookup result");
+    }
+    return { lat: data.lat, lon: data.lon };
+  }
+
+  if (params.query) {
+    const url = new URL("https://api.openweathermap.org/geo/1.0/direct");
+    url.searchParams.set("q", params.query);
+    url.searchParams.set("limit", "1");
+    url.searchParams.set("appid", apiKey);
+    const res = await fetch(url.toString());
+    if (!res.ok) throw new Error("Failed to resolve place");
+    const data: any = await res.json();
+    const first = Array.isArray(data) ? data[0] : null;
+    if (!first || typeof first.lat !== "number" || typeof first.lon !== "number") {
+      throw new Error("Invalid place lookup result");
+    }
+    return { lat: first.lat, lon: first.lon };
+  }
+
+  throw new Error("Missing zip or query");
+}
+
+async function fetchTempF_OpenWeather(params: {
+  lat: number;
+  lon: number;
+}): Promise<{ tempF: number; provider: string }> {
+  const apiKey = getWeatherApiKey();
+  if (!apiKey) throw new Error("OPENWEATHER_API_KEY not set");
+
+  const url = new URL("https://api.openweathermap.org/data/2.5/weather");
+  url.searchParams.set("lat", params.lat.toString());
+  url.searchParams.set("lon", params.lon.toString());
+  url.searchParams.set("appid", apiKey);
+  url.searchParams.set("units", "imperial");
+
+  const res = await fetch(url.toString());
+  if (!res.ok) throw new Error("Failed to fetch weather");
+  const data: any = await res.json();
+  const temp = data?.main?.temp;
+  if (typeof temp !== "number") throw new Error("Invalid weather response");
+  return { tempF: temp, provider: "openweather" };
+}
+
+async function getTemperatureForDate(params: {
+  dateKey: string;
+  lat: number;
+  lon: number;
+}): Promise<{ tempF: number; provider: string }> {
+  const provider = getWeatherProvider();
+  if (provider !== "openweather") {
+    throw new Error(`Unsupported weather provider: ${provider}`);
+  }
+
+  const lat = Math.round(params.lat * 100) / 100;
+  const lon = Math.round(params.lon * 100) / 100;
+  const cacheKey = `wx:${params.dateKey}:F:${lat}:${lon}`;
+  const cached = weatherCache.get(cacheKey);
+  const ttlMs = Number(process.env.WEATHER_CACHE_TTL_MS ?? 2 * 60 * 60 * 1000);
+  if (cached && Date.now() - cached.fetchedAtMs < ttlMs) {
+    return { tempF: cached.tempF, provider: cached.provider };
+  }
+
+  const fresh = await fetchTempF_OpenWeather({ lat, lon });
+  weatherCache.set(cacheKey, {
+    tempF: fresh.tempF,
+    fetchedAtMs: Date.now(),
+    provider: fresh.provider,
+  });
+  return fresh;
+}
+
 async function commitChallengeEvent(params: {
   userId: string;
   userChallengeId: string;
@@ -65,8 +521,8 @@ async function commitChallengeEvent(params: {
     return { paymentIntentId: ce.paymentIntentId, status: "ALREADY_COMMITTED" };
   }
 
-  const amountCents = ce.amountCents;
-  if (!amountCents || amountCents <= 0) throw new Error("Invalid amount");
+    const amountCents = ce.amountCents;
+    if (!amountCents || amountCents <= 0) throw new Error("Invalid amount");
 
   const pendingDepositId = await getSystemAccountId(AccountType.PENDING_DEPOSIT);
   const externalClearingId = await getSystemAccountId(AccountType.EXTERNAL_CLEARING);
@@ -74,6 +530,7 @@ async function commitChallengeEvent(params: {
 
   const pi = await prisma.$transaction(async (tx) => {
     let existing = await tx.paymentIntent.findUnique({ where: { idempotencyKey: idempo } });
+    let didSettle = false;
 
     if (!existing) {
       const jeInit = await tx.journalEntry.create({
@@ -122,6 +579,7 @@ async function commitChallengeEvent(params: {
         where: { id: existing.id },
         data: { status: "SETTLED", settledEntryId: jeSettle.id },
       });
+      didSettle = true;
     }
 
     await tx.challengeEvent.update({
@@ -131,6 +589,33 @@ async function commitChallengeEvent(params: {
         metadata: { ...(ce.metadata as any), committedAt: new Date().toISOString() },
       },
     });
+
+    // Streak: first challenge save this UTC day extends or starts streak
+    if (didSettle) {
+      const now = new Date();
+      const todayStr = toDateStringUtc(now);
+      const yesterdayStr = toDateStringUtc(addDaysUtc(utcDateOnly(now), -1));
+      const user = await tx.user.findUnique({ where: { id: userId } });
+      if (user) {
+        const u = user as any;
+        const last = u.lastStreakDateUtc as string | null | undefined;
+        const current = typeof u.currentStreakDays === "number" ? u.currentStreakDays : 0;
+        const best = typeof u.bestStreakDays === "number" ? u.bestStreakDays : 0;
+        let newCurrent: number;
+        if (last === todayStr) newCurrent = current;
+        else if (last === yesterdayStr) newCurrent = current + 1;
+        else newCurrent = 1;
+        const newBest = Math.max(best, newCurrent);
+        await tx.user.update({
+          where: { id: userId },
+          data: {
+            lastStreakDateUtc: todayStr,
+            currentStreakDays: newCurrent,
+            bestStreakDays: newBest,
+          } as any,
+        });
+      }
+    }
 
     return existing;
   });
@@ -256,6 +741,31 @@ app.post("/users", async () => {
   return { userId: user.id };
 });
 
+async function ensureUserForEmail(email: string): Promise<{ userId: string }> {
+  const existing = await prisma.user.findUnique({ where: { email } });
+  if (existing) return { userId: existing.id };
+  const user = await prisma.user.create({ data: { email } });
+  await prisma.account.create({
+    data: { userId: user.id, type: AccountType.USER_STASH },
+  });
+  const systemTypes: AccountType[] = [
+    AccountType.PENDING_DEPOSIT,
+    AccountType.PENDING_WITHDRAW,
+    AccountType.EXTERNAL_CLEARING,
+    AccountType.TREASURY_USDC,
+    AccountType.FEES_REVENUE,
+  ];
+  for (const t of systemTypes) {
+    const exists = await prisma.account.findFirst({
+      where: { userId: null, type: t },
+    });
+    if (!exists) {
+      await prisma.account.create({ data: { userId: null, type: t } });
+    }
+  }
+  return { userId: user.id };
+}
+
 // Post a journal entry (idempotent, atomic, must sum to 0)
 app.post("/ledger/entries", async (req, reply) => {
   const parsed = PostEntrySchema.safeParse(req.body);
@@ -329,8 +839,155 @@ app.get("/ledger/accounts/:accountId/balance", async (req, reply) => {
   };
 });
 
+// --- Auth routes (magic link + session) ---
+function sanitizeReturnTo(value: string | undefined): string | null {
+  if (value == null || typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || !trimmed.startsWith("/") || trimmed.includes("//")) return null;
+  return trimmed;
+}
+
+const AuthStartSchema = z.object({
+  email: z.string().email().transform((e) => e.trim().toLowerCase()),
+  returnTo: z.string().optional(),
+});
+
+app.post("/auth/start", async (req, reply) => {
+  const ip = getClientIP(req);
+  if (!checkRateLimit(`auth:ip:${ip}`, rateLimitIP, 10)) {
+    return reply.code(429).header("Retry-After", "60").send({ error: "rate_limit", retryAfterSeconds: 60 });
+  }
+  const parsed = AuthStartSchema.safeParse(req.body);
+  if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+  const email = parsed.data.email;
+  const returnTo = sanitizeReturnTo(parsed.data.returnTo) ?? null;
+  if (!checkRateLimit(`auth:email:${email}`, rateLimitUser, 5)) {
+    return reply.code(429).header("Retry-After", "60").send({ error: "rate_limit", retryAfterSeconds: 60 });
+  }
+  if (!AUTH_PEPPER) {
+    app.log.info({ email }, "auth/start: AUTH_PEPPER not set, skipping magic link");
+    return reply.send({ ok: true });
+  }
+  const rawToken = generateRawToken();
+  const tokenHash = hashWithPepper(rawToken);
+  const expiresAt = new Date(Date.now() + AUTH_TOKEN_TTL_MIN * 60 * 1000);
+  await prisma.authToken.create({
+    data: {
+      email,
+      tokenHash,
+      purpose: "magic_link",
+      returnTo,
+      expiresAt,
+      ip: getClientIP(req),
+      userAgent: (req.headers["user-agent"] as string) ?? undefined,
+    },
+  });
+  const baseUrl = API_ORIGIN || `http://localhost:${env.data.PORT}`;
+  const callbackUrl = `${baseUrl}/auth/callback?token=${encodeURIComponent(rawToken)}`;
+  if (IS_DEV || !process.env.EMAIL_PROVIDER) {
+    app.log.info({ email, link: callbackUrl }, "magic link (dev)");
+  } else {
+    await sendMagicLinkEmail(email, callbackUrl);
+  }
+  return reply.send({ ok: true });
+});
+
+async function sendMagicLinkEmail(email: string, link: string): Promise<void> {
+  // TODO: wire Resend/Postmark/SendGrid/SES; for now no-op when not dev
+  app.log.info({ email, link }, "sendMagicLinkEmail (no provider configured)");
+}
+
+app.get("/auth/callback", async (req, reply) => {
+  const token = (req.query as any)?.token as string;
+  if (!token || typeof token !== "string") {
+    return reply.redirect(302, APP_ORIGIN ? `${APP_ORIGIN}/auth/error?reason=missing_token` : "/");
+  }
+  if (!AUTH_PEPPER) {
+    return reply.redirect(302, APP_ORIGIN ? `${APP_ORIGIN}/auth/error?reason=config` : "/");
+  }
+  const tokenHash = hashWithPepper(token);
+  const row = await prisma.authToken.findFirst({
+    where: { tokenHash, consumedAt: null, expiresAt: { gt: new Date() } },
+  });
+  if (!row) {
+    return reply.redirect(302, APP_ORIGIN ? `${APP_ORIGIN}/auth/error?reason=invalid` : "/");
+  }
+  await prisma.authToken.update({ where: { id: row.id }, data: { consumedAt: new Date() } });
+  const returnToPath = sanitizeReturnTo(row.returnTo) ?? "/";
+  let user = await prisma.user.findUnique({ where: { email: row.email } });
+  if (!user) {
+    const created = await ensureUserForEmail(row.email);
+    user = await prisma.user.findUnique({ where: { id: created.userId } })!;
+  } else if (!user.email) {
+    await prisma.user.update({ where: { id: user.id }, data: { email: row.email } });
+    user = await prisma.user.findUnique({ where: { id: user.id } })!;
+  }
+  const rawSession = generateRawSession();
+  const sessionHash = hashWithPepper(rawSession);
+  const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000);
+  await prisma.session.create({
+    data: {
+      userId: user!.id,
+      sessionHash,
+      expiresAt,
+      ip: getClientIP(req),
+      userAgent: (req.headers["user-agent"] as string) ?? undefined,
+    },
+  });
+  const successPath = `/auth/success?returnTo=${encodeURIComponent(returnToPath)}`;
+  const redirectTo = APP_ORIGIN ? `${APP_ORIGIN}${successPath}` : successPath;
+  setSessionCookie(reply, rawSession, SESSION_TTL_DAYS);
+  return reply.redirect(302, redirectTo);
+});
+
+app.post("/auth/logout", async (req, reply) => {
+  const rawSession = getCookie(req, COOKIE_NAME);
+  if (rawSession && AUTH_PEPPER) {
+    const sessionHash = hashWithPepper(rawSession);
+    await prisma.session.updateMany({
+      where: { sessionHash },
+      data: { revokedAt: new Date() },
+    });
+  }
+  clearSessionCookie(reply);
+  return reply.send({ ok: true });
+});
+
+app.get("/auth/me", async (req, reply) => {
+  const devUserId = IS_DEV && (req.headers["x-user-id"] as string)?.trim();
+  if (devUserId) {
+    const user = await prisma.user.findUnique({
+      where: { id: devUserId },
+      select: { id: true, email: true, tier: true, flags: true },
+    });
+    if (user) {
+      return reply.send({
+        userId: user.id,
+        email: user.email ?? undefined,
+        tier: user.tier,
+        flags: resolveFlags(user.tier as any, user.flags),
+      });
+    }
+  }
+  const rawSession = getCookie(req, COOKIE_NAME);
+  if (!rawSession) return reply.code(401).send({ error: "unauthorized" });
+  const sessionHash = hashWithPepper(rawSession);
+  if (!sessionHash) return reply.code(503).send({ error: "auth_not_configured" });
+  const session = await prisma.session.findFirst({
+    where: { sessionHash, revokedAt: null, expiresAt: { gt: new Date() } },
+    include: { user: { select: { id: true, email: true, tier: true, flags: true } } },
+  });
+  if (!session) return reply.code(401).send({ error: "unauthorized" });
+  return reply.send({
+    userId: session.user.id,
+    email: session.user.email ?? undefined,
+    tier: session.user.tier,
+    flags: resolveFlags(session.user.tier as any, session.user.flags),
+  });
+});
+
 // Utility: list a user's accounts
-app.get("/users/:userId/accounts", async (req, reply) => {
+app.get("/users/:userId/accounts", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
   const userId = (req.params as any).userId as string;
 
   const user = await prisma.user.findUnique({
@@ -535,7 +1192,7 @@ app.post("/payments/withdrawals", async (req, reply) => {
   return created;
 });
 
-app.post("/users/:userId/withdraw/wallet", async (req, reply) => {
+app.post("/users/:userId/withdraw/wallet", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
   const pathUserId = (req.params as any).userId as string;
   const parsed = WithdrawWalletSchema.safeParse({ ...req.body, userId: pathUserId });
   if (!parsed.success)
@@ -701,7 +1358,7 @@ app.post("/webhooks/withdrawals/paid", async (req, reply) => {
   return updated;
 });
 
-app.get("/users/:userId/transactions", async (req, reply) => {
+app.get("/users/:userId/transactions", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
   const userId = (req.params as any).userId as string;
   const stashId = await getUserStashAccountId(userId);
 
@@ -923,6 +1580,44 @@ app.get("/debug/stash-balances", async () => {
   return { count: results.length, accounts: results };
 });
 
+app.get("/debug/health/ledger", async (req, reply) => {
+  const issues: string[] = [];
+  let ok = true;
+
+  const entries = await prisma.journalEntry.findMany({
+    include: { lines: true },
+  });
+  for (const entry of entries) {
+    const sum = entry.lines.reduce((s, l) => s + l.amountCents, 0);
+    if (sum !== 0) {
+      issues.push(`Entry ${entry.id} (idempotencyKey: ${entry.idempotencyKey}) lines sum to ${sum}, expected 0`);
+      ok = false;
+    }
+  }
+
+  const globalSum = await prisma.journalLine.aggregate({
+    _sum: { amountCents: true },
+  });
+  const totalCents = globalSum._sum.amountCents ?? 0;
+  if (totalCents !== 0) {
+    issues.push(`Global sum of all journal lines is ${totalCents}, expected 0 (double-entry violation)`);
+    ok = false;
+  }
+
+  const entryCount = await prisma.journalEntry.count();
+  const distinctKeys = await prisma.journalEntry.groupBy({
+    by: ["idempotencyKey"],
+    _count: { id: true },
+  });
+  if (distinctKeys.length !== entryCount) {
+    issues.push(`Idempotency key uniqueness: ${entryCount} entries but ${distinctKeys.length} distinct keys`);
+    ok = false;
+  }
+
+  if (!ok) return reply.code(503).send({ ok: false, issues });
+  return reply.send({ ok: true, checked: { entries: entryCount, globalSum: totalCents } });
+});
+
 // --- Feature flags & tiers (dev/admin) ---
 app.post("/debug/seed/flags", async () => {
   const flags = [
@@ -996,7 +1691,7 @@ app.post("/debug/seed/flags", async () => {
   return { ok: true };
 });
 
-app.get("/users/:userId/flags", async (req, reply) => {
+app.get("/users/:userId/flags", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
   const userId = (req.params as any).userId as string;
 
   const user = await prisma.user.findUnique({
@@ -1014,11 +1709,19 @@ app.get("/users/:userId/flags", async (req, reply) => {
   for (const p of tierPolicies) baseMap.set(p.flagKey, p.enabled);
   for (const o of user.flagOverrides) baseMap.set(o.flagKey, o.enabled);
 
-  return {
+  const payload = {
     userId,
     tier: user.tier,
     flags: Object.fromEntries(baseMap.entries()),
   };
+  const etag = weakEtag("flags", stableStringify(payload));
+  const cacheControl = "private, max-age=300";
+  if (ifNoneMatch(req) === etag) {
+    reply.code(304).header("ETag", etag).header("Cache-Control", cacheControl);
+    return reply.send();
+  }
+  reply.header("ETag", etag).header("Cache-Control", cacheControl);
+  return reply.send(payload);
 });
 
 const SetTierSchema = z.object({
@@ -1052,6 +1755,64 @@ app.post("/debug/seed/challenges", async () => {
         maxWeeks: 52,
         weekday: 1,
         schedule: { type: "weekly", dayOfWeek: "MON", catchUp: true },
+      },
+    },
+    {
+      slug: "weather_wednesday",
+      name: "Weather Wednesday",
+      defaultRules: {
+        type: "weather_wednesday",
+        schedule: {
+          type: "weekday",
+          daysOfWeek: ["WED"],
+          timeOfDayLocal: "09:00",
+          catchUp: true,
+        },
+        amount: {
+          mode: "choice",
+          maxAmountCents: 2000,
+          scale: 1,
+          prompt: "How’s the weather today?",
+          options: [
+            { choice: "Sunny", amountCents: 500 },
+            { choice: "Cloudy", amountCents: 700 },
+            { choice: "Rainy", amountCents: 1000 },
+          ],
+          defaultAmountCents: 700,
+        },
+        autoCommitDefault: false,
+      },
+    },
+    {
+      slug: "temperature_daily",
+      name: "Temperature Challenge",
+      defaultRules: {
+        type: "temperature",
+        schedule: { type: "daily", catchUp: true },
+        autoCommitDefault: false,
+        amount: {
+          mode: "temperature",
+          unit: "F",
+          scale: 1,
+          maxAmountCents: 50000,
+          prompt: "Save today’s temperature",
+        },
+      },
+    },
+    {
+      slug: "dice_daily",
+      name: "Roll the Dice",
+      defaultRules: {
+        type: "dice",
+        schedule: { type: "daily", catchUp: true },
+        autoCommitDefault: false,
+        amount: {
+          mode: "dice",
+          sides: 6,
+          unitAmountCents: 100,
+          maxAmountCents: 2000,
+          prompt: "Roll to save today",
+        },
       },
     },
     {
@@ -1116,7 +1877,7 @@ app.get("/debug/users/:userId/payment-intents", async (req, reply) => {
   return { userId, paymentIntents };
 });
 
-app.get("/users/:userId/config", async (req, reply) => {
+app.get("/users/:userId/config", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
   const userId = (req.params as any).userId as string;
   const user = await prisma.user.findUnique({
     where: { id: userId },
@@ -1125,10 +1886,18 @@ app.get("/users/:userId/config", async (req, reply) => {
   if (!user) return reply.code(404).send({ error: "User not found" });
 
   const flags = resolveFlags(user.tier as any, user.flags);
-  return { userId: user.id, tier: user.tier, flags };
+  const payload = { userId: user.id, tier: user.tier, flags };
+  const etag = weakEtag("cfg", stableStringify(payload));
+  const cacheControl = "private, max-age=300";
+  if (ifNoneMatch(req) === etag) {
+    reply.code(304).header("ETag", etag).header("Cache-Control", cacheControl);
+    return reply.send();
+  }
+  reply.header("ETag", etag).header("Cache-Control", cacheControl);
+  return reply.send(payload);
 });
 
-app.get("/users/:userId/stash/value", async (req, reply) => {
+app.get("/users/:userId/stash/value", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
   const userId = (req.params as any).userId as string;
   const stashId = await getUserStashAccountId(userId);
 
@@ -1208,12 +1977,22 @@ function formatChallengeDetail(uc?: any, ev?: any) {
   } else if (type === "weekly_increment") {
     const wk = meta.weeksSinceStart ?? meta.week ?? meta.weekNumber;
     if (wk) return `Week ${wk}`;
+  } else if (type === "weather_wednesday") {
+    if (typeof meta.tempF === "number") return `${meta.tempF}°F`;
+    if (typeof meta.tempC === "number") return `${meta.tempC}°C`;
+    if (meta.weather) return String(meta.weather);
+    if (meta.weekday) return String(meta.weekday);
+    return "Wednesday";
+  } else if (type === "temperature") {
+    if (typeof meta.tempF === "number") return `${meta.tempF}°F`;
+    if (typeof meta.tempC === "number") return `${meta.tempC}°C`;
+    if (meta.weekday) return String(meta.weekday);
   }
 
   return null;
 }
 
-app.get("/users/:userId/activity", async (req, reply) => {
+app.get("/users/:userId/activity", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
   const userId = (req.params as any).userId as string;
   const limit = Math.min(Number((req.query as any).limit ?? 50), 100);
 
@@ -1293,7 +2072,7 @@ app.get("/users/:userId/activity", async (req, reply) => {
           at: pi.updatedAt ?? pi.createdAt,
           category: "challenge",
           title: `Challenge saved $${(pi.amountCents / 100).toFixed(0)}`,
-          subtitle: detail ? `${name} • ${detail}` : name,
+          subtitle: detail ? `${name} - ${detail}` : name,
           amountCents: pi.amountCents,
           meta: {
             challengeSlug: uc?.template?.slug,
@@ -1439,11 +2218,411 @@ app.get("/users/:userId/activity", async (req, reply) => {
   return reply.send({ userId, events: events.slice(0, limit) });
 });
 
+async function buildTodayCards(
+  userId: string,
+  now: Date,
+): Promise<{ cards: any[]; banner: any }> {
+  const todayStr = toDateStringUtc(now);
+  const cacheKey = `today:${userId}:${todayStr}`;
+  const cached = todayCardsCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt) return cached.data;
+
+  const dayStart = utcDateOnly(now);
+  const dayEnd = addDaysUtc(dayStart, 1);
+
+  const ucs = await prisma.userChallenge.findMany({
+    where: { userId, status: "ACTIVE" },
+    include: { template: true },
+  });
+
+  const pendingEvents = await prisma.challengeEvent.findMany({
+    where: {
+      userChallenge: { userId, status: "ACTIVE" },
+      paymentIntentId: null,
+      scheduledFor: { gte: dayStart, lt: dayEnd },
+      amountCents: null,
+    },
+    orderBy: { scheduledFor: "asc" },
+  });
+
+  const pendingCount = await prisma.challengeEvent.count({
+    where: {
+      userChallenge: { userId, status: "ACTIVE" },
+      paymentIntentId: null,
+      scheduledFor: { lte: now },
+      amountCents: { gt: 0 },
+    },
+  });
+  const pendingInputCount = await prisma.challengeEvent.count({
+    where: {
+      userChallenge: { userId, status: "ACTIVE" },
+      paymentIntentId: null,
+      scheduledFor: { lte: now },
+      amountCents: null,
+    },
+  });
+
+  const ucById = new Map(ucs.map((uc) => [uc.id, uc]));
+  const cards: any[] = [];
+
+  for (const ev of pendingEvents) {
+    const uc = ucById.get(ev.userChallengeId);
+    const rules = (uc?.rules as any) ?? (uc?.template as any)?.defaultRules ?? {};
+    const amount = rules.amount ?? {};
+
+    if (rules.type === "weather_wednesday") {
+      const options = Array.isArray(amount.options) ? amount.options : [];
+      cards.push({
+        type: "weather_wednesday",
+        eventId: ev.id,
+        challengeId: ev.userChallengeId,
+        title: uc?.name ?? "Weather Wednesday",
+        prompt: amount.prompt ?? "How’s the weather today?",
+        unit: amount.unit ?? "F",
+        scale: amount.scale ?? 1,
+        choices: options.map((o: any) => ({
+          choice: o.choice ?? o.label,
+          amountCents: o.amountCents,
+        })),
+        scheduledFor: ev.scheduledFor.toISOString(),
+        needsInput: true,
+        maxAmountCents: amount.maxAmountCents ?? 2000,
+      });
+    } else if (rules.type === "temperature") {
+      const settings = (uc?.settings as any) ?? {};
+      const override = Number(settings.scaleOverride);
+      const effectiveScale =
+        override === 1 || override === 10 ? override : Number(amount.scale ?? 1);
+
+      cards.push({
+        type: "temperature_daily",
+        eventId: ev.id,
+        challengeId: ev.userChallengeId,
+        userChallengeId: ev.userChallengeId,
+        title: uc?.name ?? "Temperature Challenge",
+        prompt: amount.prompt ?? "Save today’s temperature",
+        unit: amount.unit ?? "F",
+        scale: effectiveScale,
+        availableScales: [1, 10],
+        scheduledFor: ev.scheduledFor.toISOString(),
+        needsInput: true,
+        maxAmountCents: amount.maxAmountCents ?? 50000,
+      });
+    } else if (rules.type === "dice") {
+      cards.push({
+        type: "dice_daily",
+        eventId: ev.id,
+        challengeId: ev.userChallengeId,
+        userChallengeId: ev.userChallengeId,
+        title: uc?.name ?? "Roll the Dice",
+        prompt: amount.prompt ?? "Roll to save today",
+        sides: amount.sides ?? 6,
+        unitAmountCents: amount.unitAmountCents ?? 100,
+        scheduledFor: ev.scheduledFor.toISOString(),
+        needsInput: true,
+        maxAmountCents: amount.maxAmountCents ?? 2000,
+      });
+    }
+  }
+
+  // Interactive anytime: 100 Envelopes (not scheduled by date)
+  const dayStartForEnvelopes = utcDateOnly(now);
+  const dayEndForEnvelopes = addDaysUtc(dayStartForEnvelopes, 1);
+  for (const uc of ucs) {
+    const templateSlug = (uc.template as any)?.slug;
+    if (templateSlug !== "100_envelopes" || uc.status !== "ACTIVE") continue;
+    const state = (uc as any).state as { remaining?: number[]; used?: number[] } | null;
+    const remaining = state?.remaining ?? [];
+    if (remaining.length === 0) continue;
+    const rules = (uc.rules as any) ?? {};
+    const min = Number(rules.min ?? 1);
+    const max = Number(rules.max ?? 100);
+    const usedCount = state?.used?.length ?? 0;
+    const drawsTodayCount = await prisma.challengeEvent.count({
+      where: {
+        userChallengeId: uc.id,
+        createdAt: { gte: dayStartForEnvelopes, lt: dayEndForEnvelopes },
+      },
+    });
+    const drewToday = drawsTodayCount >= 1;
+    // Route A: Today = actionable only — omit envelope card when already drew today
+    if (!drewToday) {
+      cards.push({
+        type: "envelopes_100",
+        title: uc?.name ?? "100 Envelopes",
+        prompt: "Draw an envelope to save",
+        needsInput: true,
+        challengeId: uc.id,
+        userChallengeId: uc.id,
+        remainingCount: remaining.length,
+        usedCount,
+        min,
+        max,
+        unitAmountCents: Number(rules.unitAmountCents ?? 100),
+        maxDrawsPerDay: 1,
+        drewToday,
+      });
+    }
+  }
+
+  const banner =
+    pendingCount > 0
+      ? {
+          type: "commit_pending",
+          pendingCount,
+          label: "Catch up your saves",
+          subLabel: "Apply what you missed (up to your daily cap)",
+        }
+      : pendingInputCount > 0
+        ? {
+            type: "needs_input",
+            pendingCount: pendingInputCount,
+            label: "Complete today’s saves",
+            subLabel: "Tap a card to finish today’s save.",
+          }
+        : undefined;
+
+  todayCardsCache.set(cacheKey, {
+    data: { cards, banner },
+    expiresAt: Date.now() + TODAY_CARDS_CACHE_TTL_MS,
+  });
+  return { cards, banner };
+}
+
+app.get("/users/:userId/challenges/today", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
+  const userId = (req.params as any).userId as string;
+  const runDueResult = await runDueForUser(userId);
+  if (!runDueResult) return reply.code(404).send({ error: "User not found" });
+  const now = new Date();
+  const { cards, banner } = await buildTodayCards(userId, now);
+  reply.header("X-Build", BUILD_TIMESTAMP);
+  reply.header("Cache-Control", "no-store");
+  return reply.send({ userId, banner, cards });
+});
+
+app.get("/users/:userId/challenges/active", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
+  const userId = (req.params as any).userId as string;
+  const r = await getActiveChallengesForUser(userId);
+  const etag = weakEtag("active", stableStringify(r));
+  const cacheControl = "private, max-age=15";
+  if (ifNoneMatch(req) === etag) {
+    reply.code(304).header("ETag", etag).header("Cache-Control", cacheControl);
+    return reply.send();
+  }
+  reply.header("ETag", etag).header("Cache-Control", cacheControl);
+  return reply.send(r);
+});
+
+async function getActiveChallengesForUser(userId: string): Promise<{
+  userId: string;
+  challenges: Array<{ userChallengeId: string; name: string; templateSlug: string | null; progress?: string }>;
+}> {
+  const ucs = await prisma.userChallenge.findMany({
+    where: { userId, status: "ACTIVE" },
+    include: { template: true },
+  });
+  const list = ucs.map((uc) => {
+    const name = uc?.name ?? (uc.template as any)?.name ?? "Challenge";
+    const slug = (uc.template as any)?.slug ?? null;
+    let progress: string | undefined;
+    const rules = (uc.rules as any) ?? {};
+    if (rules.type === "envelopes") {
+      const state = (uc as any).state as { used?: number[] } | null;
+      const used = state?.used?.length ?? 0;
+      const total = Number(rules.max ?? 100) - Number(rules.min ?? 1) + 1;
+      progress = `${used}/${total}`;
+    }
+    return { userChallengeId: uc.id, name, templateSlug: slug, progress };
+  });
+  return { userId, challenges: list };
+}
+
+async function getStreakForUser(userId: string): Promise<{
+  userId: string;
+  todayCompleted: boolean;
+  currentStreakDays: number;
+  bestStreakDays: number;
+  lastCompletedDateUtc: string | null;
+} | null> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { currentStreakDays: true, bestStreakDays: true, lastStreakDateUtc: true },
+  });
+  if (!user) return null;
+
+  const now = new Date();
+  const dayStart = utcDateOnly(now);
+  const dayEnd = addDaysUtc(dayStart, 1);
+  const todayStr = toDateStringUtc(now);
+  const yesterdayStr = toDateStringUtc(addDaysUtc(dayStart, -1));
+
+  const todayCount = await prisma.paymentIntent.count({
+    where: {
+      userId,
+      type: "DEPOSIT",
+      status: "SETTLED",
+      createdAt: { gte: dayStart, lt: dayEnd },
+      metadata: { path: ["source"], equals: "challenge" },
+    },
+  });
+  const todayCompleted = todayCount >= 1;
+
+  const u = user as any;
+  const last = u.lastStreakDateUtc ?? null;
+  const storedCurrent = u.currentStreakDays ?? 0;
+  const best = u.bestStreakDays ?? 0;
+
+  const streakValid = last === todayStr || last === yesterdayStr;
+  let currentStreakDays = storedCurrent;
+  if (!streakValid && storedCurrent > 0) {
+    await prisma.user.update({
+      where: { id: userId },
+      data: { currentStreakDays: 0 } as any,
+    });
+    currentStreakDays = 0;
+  }
+
+  return {
+    userId,
+    todayCompleted,
+    currentStreakDays,
+    bestStreakDays: best,
+    lastCompletedDateUtc: last,
+  };
+}
+
+app.get("/users/:userId/streak", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
+  const userId = (req.params as any).userId as string;
+  const r = await getStreakForUser(userId);
+  if (!r) return reply.code(404).send({ error: "User not found" });
+  const etag = weakEtag("streak", stableStringify(r));
+  const cacheControl = "private, max-age=30";
+  if (ifNoneMatch(req) === etag) {
+    reply.code(304).header("ETag", etag).header("Cache-Control", cacheControl);
+    return reply.send();
+  }
+  reply.header("ETag", etag).header("Cache-Control", cacheControl);
+  return reply.send(r);
+});
+
+app.get("/users/:userId/home", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
+  const userId = (req.params as any).userId as string;
+  const startTime = Date.now();
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { tier: true, flags: true },
+  });
+  if (!user) return reply.code(404).send({ error: "User not found" });
+
+  await runDueForUser(userId);
+
+  const [streak, today, activeChallenges] = await Promise.all([
+    getStreakForUser(userId),
+    buildTodayCards(userId, new Date()),
+    getActiveChallengesForUser(userId),
+  ]);
+  if (!streak) return reply.code(404).send({ error: "User not found" });
+
+  let stashAccountId: string;
+  try {
+    stashAccountId = await getUserStashAccountId(userId);
+  } catch {
+    return reply.code(404).send({ error: "User stash not found" });
+  }
+  const stashAgg = await prisma.journalLine.aggregate({
+    where: { accountId: stashAccountId },
+    _sum: { amountCents: true },
+  });
+  const stashBalanceCents = stashAgg._sum.amountCents ?? 0;
+
+  const config = {
+    tier: user.tier,
+    flags: resolveFlags(user.tier as any, user.flags),
+  };
+
+  const payload = {
+    config,
+    streak,
+    stashBalanceCents,
+    stashAccountId,
+    today: { cards: today.cards, banner: today.banner },
+    activeChallenges: activeChallenges.challenges,
+  };
+
+  app.log.info({
+    route: "GET /users/:userId/home",
+    userId,
+    durationMs: Date.now() - startTime,
+    cardsCount: today.cards.length,
+    bannerType: today.banner?.type,
+  });
+
+  reply.header("X-Build", BUILD_TIMESTAMP);
+  reply.header("Cache-Control", "no-store");
+  return reply.send(payload);
+});
+
+const UpdateChallengeSettingsSchema = z.object({
+  scaleOverride: z.number().int().optional(),
+});
+
+app.patch(
+  "/users/:userId/challenges/:userChallengeId/settings",
+  { preHandler: [requireAuth, requireUserIdMatch] },
+  async (req, reply) => {
+    const userId = (req.params as any).userId as string;
+    const userChallengeId = (req.params as any).userChallengeId as string;
+    const parsed = UpdateChallengeSettingsSchema.safeParse(req.body);
+    if (!parsed.success)
+      return reply.code(400).send({ error: parsed.error.flatten() });
+
+    const uc = await prisma.userChallenge.findUnique({
+      where: { id: userChallengeId },
+      include: { template: true },
+    });
+    if (!uc || uc.userId !== userId)
+      return reply.code(404).send({ error: "Challenge not found" });
+
+    const rules = (uc.rules as any) ?? (uc.template as any)?.defaultRules ?? {};
+    const amount = rules.amount ?? {};
+    if (rules.type !== "temperature") {
+      return reply.code(400).send({ error: "Scale override not supported" });
+    }
+
+    const nextSettings = { ...(uc.settings as any) };
+    if (parsed.data.scaleOverride !== undefined) {
+      const v = parsed.data.scaleOverride;
+      if (v !== 1 && v !== 10) {
+        return reply.code(400).send({ error: "scaleOverride must be 1 or 10" });
+      }
+      nextSettings.scaleOverride = v;
+    }
+
+    const updated = await prisma.userChallenge.update({
+      where: { id: uc.id },
+      data: { settings: nextSettings },
+    });
+
+    const override = Number((updated.settings as any)?.scaleOverride);
+    const effectiveScale =
+      override === 1 || override === 10 ? override : Number(amount.scale ?? 1);
+
+    return reply.send({
+      ok: true,
+      userChallengeId: updated.id,
+      settings: updated.settings,
+      effectiveScale,
+    });
+  },
+);
+
 const StartChallengeSchema = z.object({
   userId: z.string().uuid(),
   templateSlug: z.string(),
   startDate: z.string().datetime().optional(), // default now
   name: z.string().optional(),
+  settings: z.record(z.any()).optional(),
 });
 
 function computeNextWeeklyRun(start: Date, weekday: number) {
@@ -1458,12 +2637,20 @@ function computeNextWeeklyRun(start: Date, weekday: number) {
   return d;
 }
 
-app.post("/challenges/start", async (req, reply) => {
+app.post("/challenges/start", { preHandler: [requireAuth] }, async (req, reply) => {
   const parsed = StartChallengeSchema.safeParse(req.body);
   if (!parsed.success)
     return reply.code(400).send({ error: parsed.error.flatten() });
 
   const { userId, templateSlug } = parsed.data;
+  if ((req as any).user?.id !== userId) {
+    return reply.code(403).send({ error: "forbidden", message: "User id does not match session" });
+  }
+  if (!checkRateLimit(`user:${userId}`, rateLimitUser, RATE_LIMIT_USER_ACTIONS)) {
+    return reply.code(429).header("Retry-After", "60").send({ error: "rate_limit", retryAfterSeconds: 60 });
+  }
+
+  const primeToday = ((req.query as any)?.primeToday ?? "false").toString() === "true";
   const startDate = parsed.data.startDate
     ? new Date(parsed.data.startDate)
     : new Date();
@@ -1481,8 +2668,13 @@ app.post("/challenges/start", async (req, reply) => {
   let nextRunAt: Date | null = null;
   let state: any = null;
 
-  if (rules.type === "weekly_increment") {
-    nextRunAt = computeNextWeeklyRun(startDate, rules.weekday ?? 1);
+    if (rules.type === "weekly_increment") {
+      nextRunAt = computeNextWeeklyRun(startDate, rules.weekday ?? 1);
+    } else if (rules.type === "weather_wednesday") {
+    const schedule = rules.schedule ?? {};
+    const days = Array.isArray(schedule.daysOfWeek) ? schedule.daysOfWeek : ["WED"];
+    const weekday = dayOfWeekToNumber(days[0] ?? "WED");
+    nextRunAt = computeNextWeeklyRun(startDate, weekday);
   } else if (rules.type === "envelopes") {
     const pool = Array.from(
       { length: (rules.max ?? 100) - (rules.min ?? 1) + 1 },
@@ -1494,6 +2686,14 @@ app.post("/challenges/start", async (req, reply) => {
     };
   }
 
+  const settingsOverride = (parsed.data.settings ?? {}) as Record<string, any>;
+  const mergedSettings = {
+    autoCommit: autoCommitDefault,
+    catchUp: catchUpDefault,
+    maxCatchUpEvents: maxCatchUpEventsDefault,
+    ...settingsOverride,
+  };
+
   const uc = await prisma.userChallenge.create({
     data: {
       userId,
@@ -1501,18 +2701,31 @@ app.post("/challenges/start", async (req, reply) => {
       name: parsed.data.name ?? template.name,
       startDate,
       rules: rules,
-      settings: {
-        autoCommit: autoCommitDefault,
-        catchUp: catchUpDefault,
-        maxCatchUpEvents: maxCatchUpEventsDefault,
-      },
+      settings: mergedSettings,
       nextRunAt,
       state,
       status: "ACTIVE",
     } as any,
   });
 
-  return { ok: true, userChallengeId: uc.id, nextRunAt, state };
+  let primed: any = null;
+  if (primeToday) {
+    try {
+      primed = await primeSingleChallengeDue(uc, new Date());
+    } catch (e: any) {
+      primed = { error: e?.message ?? "prime_failed" };
+    }
+  }
+
+  return {
+    ok: true,
+    userChallengeId: uc.id,
+    nextRunAt,
+    state,
+    primed,
+    primedEventId: primed?.eventId ?? null,
+    templateSlug,
+  };
 });
 
 app.post("/challenges/run-due", async () => {
@@ -1597,15 +2810,13 @@ app.post("/challenges/run-due", async () => {
   return { ok: true, processed };
 });
 
-app.post("/users/:userId/challenges/run-due", async (req, reply) => {
-  const userId = (req.params as any).userId as string;
+async function runDueForUserImpl(userId: string): Promise<any | null> {
   const now = new Date();
-
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: { tier: true, flags: true },
   });
-  if (!user) return reply.code(404).send({ error: "User not found" });
+  if (!user) return null;
 
   const rawUserFlags = (user.flags as any) ?? {};
   const dailyCapOverride = rawUserFlags.dailyAutoSaveCapCents;
@@ -1655,7 +2866,13 @@ app.post("/users/:userId/challenges/run-due", async (req, reply) => {
 
   for (const uc of ucs) {
     const rules = (uc.rules as any) ?? {};
-    if (rules.type !== "weekly_increment") continue;
+    if (
+      rules.type !== "weekly_increment" &&
+      rules.type !== "weather_wednesday" &&
+      rules.type !== "temperature" &&
+      rules.type !== "dice"
+    )
+      continue;
 
     const schedule = rules.schedule ?? {};
     const settings = (uc.settings as any) ?? {};
@@ -1667,17 +2884,30 @@ app.post("/users/:userId/challenges/run-due", async (req, reply) => {
     );
     const autoCommit = settings.autoCommit !== false;
 
-    const weekday =
+    const allowed = catchUp ? maxCatchUpEvents : Math.min(1, maxCatchUpEvents || 1);
+
+    const isWeekdaySchedule = schedule.type === "weekday";
+    const isDailySchedule = schedule.type === "daily";
+    const scheduleDays = Array.isArray(schedule.daysOfWeek) ? schedule.daysOfWeek : [];
+    const scheduleDayNums = isDailySchedule
+      ? [0, 1, 2, 3, 4, 5, 6]
+      : scheduleDays.map(dayOfWeekToNumber);
+
+    const weeklyWeekday =
       typeof schedule.dayOfWeek === "string"
         ? dayOfWeekToNumber(schedule.dayOfWeek)
         : Number(rules.weekday ?? 1);
 
-    const firstRun = computeNextWeeklyRun(uc.startDate, weekday);
+    const firstRun = computeNextWeeklyRun(
+      uc.startDate,
+      isWeekdaySchedule && scheduleDayNums.length > 0 ? scheduleDayNums[0] : weeklyWeekday,
+    );
     const startCursor = uc.lastRunAt
-      ? new Date(new Date(uc.lastRunAt).getTime() + 7 * 24 * 3600 * 1000)
+      ? new Date(
+          new Date(uc.lastRunAt).getTime() +
+            ((isWeekdaySchedule || isDailySchedule) ? 24 : 7) * 3600 * 1000,
+        )
       : firstRun;
-
-    const allowed = catchUp ? maxCatchUpEvents : Math.min(1, maxCatchUpEvents || 1);
 
     let cursor = startCursor;
     let createdEvents = 0;
@@ -1687,8 +2917,8 @@ app.post("/users/:userId/challenges/run-due", async (req, reply) => {
     let skippedCapCount = 0;
     let lastScheduled: Date | null = null;
 
-    for (let i = 0; i < allowed && cursor <= now; i++) {
-      const dayKey = yyyymmddUtc(cursor);
+    const processEvent = async (scheduledAt: Date) => {
+      const dayKey = yyyymmddUtc(scheduledAt);
       const eventIdempo = `sched_${uc.id}_${dayKey}`;
 
       const existing = await prisma.challengeEvent.findUnique({
@@ -1696,25 +2926,46 @@ app.post("/users/:userId/challenges/run-due", async (req, reply) => {
       });
 
       let evId: string;
-      let amountCents: number;
+      let amountCents: number | null | undefined;
       if (existing) {
         skippedExisting += 1;
         evId = existing.id;
         amountCents = existing.amountCents;
       } else {
         const weekIndex =
-          Math.floor((cursor.getTime() - firstRun.getTime()) / (7 * 24 * 3600 * 1000)) + 1;
-        amountCents =
-          (rules.week1AmountCents ?? 100) + (weekIndex - 1) * (rules.incrementCents ?? 100);
+          Math.floor((scheduledAt.getTime() - firstRun.getTime()) / (7 * 24 * 3600 * 1000)) + 1;
+
+        if (rules.type === "weekly_increment") {
+          amountCents =
+            (rules.week1AmountCents ?? 100) + (weekIndex - 1) * (rules.incrementCents ?? 100);
+        } else if (rules.type === "weather_wednesday") {
+          const amtRules = rules.amount ?? {};
+          amountCents = autoCommit
+            ? Number(amtRules.defaultAmountCents ?? 700) > 0
+              ? Number(amtRules.defaultAmountCents)
+              : 700
+            : null;
+        } else {
+          amountCents = null;
+        }
+
+        const dayLabel = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"][
+          scheduledAt.getUTCDay()
+        ];
 
         const created = await prisma.challengeEvent.create({
           data: {
             userChallengeId: uc.id,
-            scheduledFor: cursor,
+            scheduledFor: scheduledAt,
             idempotencyKey: eventIdempo,
             amountCents,
             result: "DEPOSIT_SCHEDULED",
-            metadata: { weeksSinceStart: weekIndex } as any,
+            metadata:
+              rules.type === "weekly_increment"
+                ? ({ weeksSinceStart: weekIndex } as any)
+                : rules.type === "dice"
+                  ? ({ weekday: dayLabel, rollStatus: "NEEDS_ROLL" } as any)
+                  : ({ weekday: dayLabel, inputStatus: "NEEDS_INPUT" } as any),
           } as any,
         });
         createdEvents += 1;
@@ -1722,6 +2973,10 @@ app.post("/users/:userId/challenges/run-due", async (req, reply) => {
       }
 
       if (autoCommit) {
+        if (!amountCents || amountCents <= 0) {
+          // skip auto-commit until user input provides a valid amount
+          return;
+        }
         // If already committed, don't re-run caps or attempt another commit.
         if (existing?.paymentIntentId) {
           alreadyCommitted += 1;
@@ -1763,12 +3018,25 @@ app.post("/users/:userId/challenges/run-due", async (req, reply) => {
         }
       }
 
-      if (!autoCommit) {
-        // no-op: event exists/created but user disabled autoCommit
-      }
+      lastScheduled = scheduledAt;
+    };
 
-      lastScheduled = cursor;
-      cursor = new Date(cursor.getTime() + 7 * 24 * 3600 * 1000);
+    if (isWeekdaySchedule || isDailySchedule) {
+      const nowDay = utcDateOnly(now);
+      let scan = utcDateOnly(cursor);
+      while (scan <= nowDay && createdEvents < allowed) {
+        const dayNum = scan.getUTCDay();
+        if (scheduleDayNums.length === 0 || scheduleDayNums.includes(dayNum)) {
+          await processEvent(scan);
+        }
+        scan = addDaysUtc(scan, 1);
+      }
+      cursor = scan;
+    } else {
+      for (let i = 0; i < allowed && cursor <= now; i++) {
+        await processEvent(cursor);
+        cursor = addDaysUtc(cursor, 7);
+      }
     }
 
     // Update scheduler pointers (best-effort, idempotent-ish)
@@ -1777,7 +3045,10 @@ app.post("/users/:userId/challenges/run-due", async (req, reply) => {
         where: { id: uc.id },
         data: {
           lastRunAt: lastScheduled,
-          nextRunAt: new Date(lastScheduled.getTime() + 7 * 24 * 3600 * 1000),
+          nextRunAt: new Date(
+            lastScheduled.getTime() +
+              ((isWeekdaySchedule || isDailySchedule) ? 24 : 7) * 24 * 3600 * 1000,
+          ),
         },
       });
     } else if (!uc.lastRunAt) {
@@ -1799,7 +3070,7 @@ app.post("/users/:userId/challenges/run-due", async (req, reply) => {
     });
   }
 
-  return reply.send({
+  return {
     ok: true,
     userId,
     now: now.toISOString(),
@@ -1812,11 +3083,33 @@ app.post("/users/:userId/challenges/run-due", async (req, reply) => {
     },
     skippedCap,
     results,
-  });
+  };
+}
+
+async function runDueForUser(userId: string): Promise<any | null> {
+  const existing = runDueLocks.get(userId);
+  if (existing) return existing;
+  const promise = runDueForUserImpl(userId);
+  runDueLocks.set(userId, promise);
+  try {
+    return await promise;
+  } finally {
+    runDueLocks.delete(userId);
+  }
+}
+
+app.post("/users/:userId/challenges/run-due", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
+  const userId = (req.params as any).userId as string;
+  const r = await runDueForUser(userId);
+  if (!r) return reply.code(404).send({ error: "User not found" });
+  return reply.send(r);
 });
 
-app.post("/users/:userId/challenges/commit-pending", async (req, reply) => {
+app.post("/users/:userId/challenges/commit-pending", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
   const userId = (req.params as any).userId as string;
+  if (!checkRateLimit(`user:${userId}`, rateLimitUser, RATE_LIMIT_USER_ACTIONS)) {
+    return reply.code(429).header("Retry-After", "60").send({ error: "rate_limit", retryAfterSeconds: 60 });
+  }
   const limit = Math.min(Math.max(Number((req.query as any)?.limit ?? 50), 1), 200);
   const now = new Date();
 
@@ -1943,7 +3236,7 @@ app.post("/users/:userId/challenges/commit-pending", async (req, reply) => {
   });
 });
 
-app.post("/challenges/:id/draw", async (req, reply) => {
+app.post("/challenges/:id/draw", { preHandler: [requireAuth] }, async (req, reply) => {
   const challengeId = (req.params as any).id;
 
   const uc = await prisma.userChallenge.findUnique({
@@ -1951,6 +3244,12 @@ app.post("/challenges/:id/draw", async (req, reply) => {
   });
   if (!uc || uc.status !== "ACTIVE") {
     return reply.code(400).send({ error: "Invalid or inactive challenge" });
+  }
+  if ((req as any).user?.id !== uc.userId) {
+    return reply.code(403).send({ error: "forbidden", message: "User id does not match session" });
+  }
+  if (!checkRateLimit(`user:${uc.userId}`, rateLimitUser, RATE_LIMIT_USER_ACTIONS)) {
+    return reply.code(429).header("Retry-After", "60").send({ error: "rate_limit", retryAfterSeconds: 60 });
   }
 
   const rules = uc.rules as any;
@@ -1969,6 +3268,30 @@ app.post("/challenges/:id/draw", async (req, reply) => {
       });
     }
     return { done: true };
+  }
+
+  // One draw per UTC day (ritual guardrail)
+  const now = new Date();
+  const startOfDayUTC = utcDateOnly(now);
+  const startOfNextDayUTC = addDaysUtc(startOfDayUTC, 1);
+  const drawsToday = await prisma.challengeEvent.count({
+    where: {
+      userChallengeId: uc.id,
+      createdAt: { gte: startOfDayUTC, lt: startOfNextDayUTC },
+    },
+  });
+  const maxDrawsPerDay = Number(rules.maxDrawsPerDay ?? settings.maxDrawsPerDay ?? 1);
+  if (drawsToday >= maxDrawsPerDay) {
+    const nextAllowedAt = startOfNextDayUTC;
+    const retryAfterSeconds = Math.max(
+      0,
+      Math.floor((nextAllowedAt.getTime() - now.getTime()) / 1000),
+    );
+    return reply.code(429).send({
+      error: "daily_limit",
+      retryAfterSeconds,
+      nextAllowedAt: nextAllowedAt.toISOString(),
+    });
   }
 
   // Draw random
@@ -2061,7 +3384,7 @@ app.post("/challenges/:id/draw", async (req, reply) => {
   }
 });
 
-app.post("/challenges/:id/roll", async (req, reply) => {
+app.post("/challenges/:id/roll", { preHandler: [requireAuth] }, async (req, reply) => {
   const challengeId = (req.params as any).id;
 
   const uc = await prisma.userChallenge.findUnique({
@@ -2069,6 +3392,12 @@ app.post("/challenges/:id/roll", async (req, reply) => {
   });
   if (!uc || uc.status !== "ACTIVE") {
     return reply.code(400).send({ error: "Invalid or inactive challenge" });
+  }
+  if ((req as any).user?.id !== uc.userId) {
+    return reply.code(403).send({ error: "forbidden", message: "User id does not match session" });
+  }
+  if (!checkRateLimit(`user:${uc.userId}`, rateLimitUser, RATE_LIMIT_USER_ACTIONS)) {
+    return reply.code(429).header("Retry-After", "60").send({ error: "rate_limit", retryAfterSeconds: 60 });
   }
 
   const rules = uc.rules as any;
@@ -2119,7 +3448,7 @@ app.post("/challenges/:id/roll", async (req, reply) => {
   }
 });
 
-app.post("/challenges/:challengeId/events/:eventId/commit", async (req, reply) => {
+app.post("/challenges/:challengeId/events/:eventId/commit", { preHandler: [requireAuth] }, async (req, reply) => {
   const { challengeId, eventId } = req.params as any;
 
   try {
@@ -2129,6 +3458,12 @@ app.post("/challenges/:challengeId/events/:eventId/commit", async (req, reply) =
     });
     if (!ce || ce.userChallengeId !== challengeId)
       return reply.code(404).send({ error: "Challenge event not found" });
+    if ((req as any).user?.id !== ce.userChallenge!.userId) {
+      return reply.code(403).send({ error: "forbidden", message: "User id does not match session" });
+    }
+    if (!checkRateLimit(`user:${ce.userChallenge!.userId}`, rateLimitUser, RATE_LIMIT_USER_ACTIONS)) {
+      return reply.code(429).header("Retry-After", "60").send({ error: "rate_limit", retryAfterSeconds: 60 });
+    }
 
     const res = await commitChallengeEvent({
       userId: ce.userChallenge!.userId,
@@ -2136,6 +3471,324 @@ app.post("/challenges/:challengeId/events/:eventId/commit", async (req, reply) =
       challengeEventId: eventId,
     });
     return { paymentIntentId: res.paymentIntentId, status: res.status, amountCents: ce.amountCents };
+  } catch (err: any) {
+    app.log.error(err);
+    return reply.code(500).send({ error: err.message });
+  }
+});
+
+const SetWeatherSchema = z.object({
+  choice: z.string().min(1),
+});
+
+const SetTemperatureSchema = z.object({
+  mode: z.enum(["gps", "place", "manual"]),
+  lat: z.number().optional(),
+  lon: z.number().optional(),
+  zip: z.string().optional(),
+  query: z.string().optional(),
+  temp: z.number().optional(),
+  unit: z.enum(["F", "C"]).optional(),
+});
+
+app.post("/challenges/:challengeId/events/:eventId/set-weather", { preHandler: [requireAuth] }, async (req, reply) => {
+  const { challengeId, eventId } = req.params as any;
+  const parsed = SetWeatherSchema.safeParse(req.body);
+  if (!parsed.success)
+    return reply.code(400).send({ error: parsed.error.flatten() });
+
+  const choice = parsed.data.choice.trim();
+
+  try {
+    const ce = await prisma.challengeEvent.findUnique({
+      where: { id: eventId },
+      include: { userChallenge: { include: { template: true } } },
+    });
+    if (!ce || ce.userChallengeId !== challengeId)
+      return reply.code(404).send({ error: "Challenge event not found" });
+    if ((req as any).user?.id !== ce.userChallenge!.userId) {
+      return reply.code(403).send({ error: "forbidden", message: "User id does not match session" });
+    }
+    if (!checkRateLimit(`user:${ce.userChallenge!.userId}`, rateLimitUser, RATE_LIMIT_USER_ACTIONS)) {
+      return reply.code(429).header("Retry-After", "60").send({ error: "rate_limit", retryAfterSeconds: 60 });
+    }
+
+    const uc = ce.userChallenge;
+    const rules = (uc?.rules as any) ?? (uc?.template as any)?.defaultRules ?? {};
+    if (rules.type !== "weather_wednesday") {
+      return reply.code(400).send({ error: "Not a weather challenge" });
+    }
+
+    if (ce.paymentIntentId) {
+      return reply.send({ status: "already_committed", paymentIntentId: ce.paymentIntentId });
+    }
+
+    const amountRules = rules.amount ?? {};
+    const options = Array.isArray(amountRules.options) ? amountRules.options : [];
+    const match =
+      options.find((o: any) => String(o.choice ?? o.label).toLowerCase() === choice.toLowerCase()) ??
+      (choice.toLowerCase() === "default"
+        ? { choice: "Default", amountCents: amountRules.defaultAmountCents ?? 700 }
+        : null);
+    if (!match || typeof match.amountCents !== "number" || match.amountCents <= 0) {
+      return reply.code(400).send({ error: "Invalid weather choice" });
+    }
+
+    const maxWeatherSaveCents = Number(amountRules.maxAmountCents ?? 2000);
+    if (match.amountCents > maxWeatherSaveCents) {
+      return reply.code(400).send({
+        error: "Weather amount exceeds limit",
+        maxAmountCents: maxWeatherSaveCents,
+      });
+    }
+
+    await prisma.challengeEvent.update({
+      where: { id: ce.id },
+      data: {
+        amountCents: match.amountCents,
+        metadata: { ...(ce.metadata as any), weather: match.choice ?? match.label },
+      },
+    });
+
+    const res = await commitChallengeEvent({
+      userId: uc!.userId,
+      userChallengeId: challengeId,
+      challengeEventId: ce.id,
+    });
+
+    return reply.send({
+      status: res.status,
+      paymentIntentId: res.paymentIntentId,
+      amountCents: match.amountCents,
+    });
+  } catch (err: any) {
+    app.log.error(err);
+    return reply.code(500).send({ error: err.message });
+  }
+});
+
+app.post("/challenges/:challengeId/events/:eventId/set-temperature", { preHandler: [requireAuth] }, async (req, reply) => {
+  const { challengeId, eventId } = req.params as any;
+  const parsed = SetTemperatureSchema.safeParse(req.body);
+  if (!parsed.success)
+    return reply.code(400).send({ error: parsed.error.flatten() });
+
+  const payload = parsed.data;
+  const unit = payload.unit ?? "F";
+
+  try {
+    const ce = await prisma.challengeEvent.findUnique({
+      where: { id: eventId },
+      include: { userChallenge: { include: { template: true } } },
+    });
+    if (!ce || ce.userChallengeId !== challengeId)
+      return reply.code(404).send({ error: "Challenge event not found" });
+    if ((req as any).user?.id !== ce.userChallenge!.userId) {
+      return reply.code(403).send({ error: "forbidden", message: "User id does not match session" });
+    }
+    if (!checkRateLimit(`user:${ce.userChallenge!.userId}`, rateLimitUser, RATE_LIMIT_USER_ACTIONS)) {
+      return reply.code(429).header("Retry-After", "60").send({ error: "rate_limit", retryAfterSeconds: 60 });
+    }
+
+    const uc = ce.userChallenge;
+    const rules = (uc?.rules as any) ?? (uc?.template as any)?.defaultRules ?? {};
+    if (rules.type !== "weather_wednesday") {
+      return reply.code(400).send({ error: "Not a weather challenge" });
+    }
+
+    if (ce.paymentIntentId) {
+      return reply.send({ status: "already_committed", paymentIntentId: ce.paymentIntentId });
+    }
+
+    let tempF: number;
+    let provider = "manual";
+    let locationMode = payload.mode;
+
+    if (payload.mode === "manual") {
+      if (typeof payload.temp !== "number")
+        return reply.code(400).send({ error: "Missing temp" });
+      tempF = toTempF(payload.temp, unit);
+    } else if (payload.mode === "gps") {
+      if (typeof payload.lat !== "number" || typeof payload.lon !== "number") {
+        return reply.code(400).send({ error: "Missing lat/lon" });
+      }
+      const dateKey = yyyymmddUtc(ce.scheduledFor ?? new Date());
+      const res = await getTemperatureForDate({
+        dateKey,
+        lat: payload.lat,
+        lon: payload.lon,
+      });
+      tempF = res.tempF;
+      provider = res.provider;
+    } else {
+      if (!payload.zip && !payload.query) {
+        return reply.code(400).send({ error: "Missing zip or query" });
+      }
+      const loc = await resolveOpenWeatherLatLon({ zip: payload.zip, query: payload.query });
+      const dateKey = yyyymmddUtc(ce.scheduledFor ?? new Date());
+      const res = await getTemperatureForDate({
+        dateKey,
+        lat: loc.lat,
+        lon: loc.lon,
+      });
+      tempF = res.tempF;
+      provider = res.provider;
+      locationMode = "place";
+    }
+
+    const amountRules = rules.amount ?? {};
+    const settings = (uc?.settings as any) ?? {};
+    const scaleOverride = Number(settings.scaleOverride);
+    const effectiveScale =
+      scaleOverride === 1 || scaleOverride === 10
+        ? scaleOverride
+        : Number(amountRules.scale ?? 1);
+
+    const user = await prisma.user.findUnique({
+      where: { id: uc!.userId },
+      select: { tier: true, flags: true },
+    });
+    const rawFlags = (user?.flags as any) ?? {};
+    const tierMax =
+      typeof rawFlags.maxSingleTempSaveCents === "number"
+        ? rawFlags.maxSingleTempSaveCents
+        : user?.tier === "DEV"
+          ? 50_000
+          : user?.tier === "POWER"
+            ? 20_000
+            : 5_000;
+
+    const maxWeatherSaveCents = Math.min(
+      Number(amountRules.maxAmountCents ?? 2000),
+      tierMax,
+    );
+    const roundedTempF = Math.round(tempF);
+    const rawCents = Math.round((roundedTempF / (effectiveScale > 0 ? effectiveScale : 1)) * 100);
+    const amountCents = clampNumber(rawCents, 0, maxWeatherSaveCents);
+    if (amountCents <= 0) {
+      return reply.code(400).send({ error: "Temperature amount must be positive" });
+    }
+
+    await prisma.challengeEvent.update({
+      where: { id: ce.id },
+      data: {
+        amountCents,
+        metadata: {
+          ...(ce.metadata as any),
+          tempF: roundedTempF,
+          provider,
+          locationMode,
+        },
+      },
+    });
+
+    const res = await commitChallengeEvent({
+      userId: uc!.userId,
+      userChallengeId: challengeId,
+      challengeEventId: ce.id,
+    });
+
+    return reply.send({
+      status: res.status,
+      paymentIntentId: res.paymentIntentId,
+      amountCents,
+      tempF: roundedTempF,
+      provider,
+    });
+  } catch (err: any) {
+    app.log.error(err);
+    return reply.code(500).send({ error: err.message });
+  }
+});
+
+app.post("/challenges/:challengeId/events/:eventId/roll", { preHandler: [requireAuth] }, async (req, reply) => {
+  const { challengeId, eventId } = req.params as any;
+
+  try {
+    const ce = await prisma.challengeEvent.findUnique({
+      where: { id: eventId },
+      include: { userChallenge: { include: { template: true } } },
+    });
+    if (!ce || ce.userChallengeId !== challengeId)
+      return reply.code(404).send({ error: "Challenge event not found" });
+    if ((req as any).user?.id !== ce.userChallenge!.userId) {
+      return reply.code(403).send({ error: "forbidden", message: "User id does not match session" });
+    }
+    if (!checkRateLimit(`user:${ce.userChallenge!.userId}`, rateLimitUser, RATE_LIMIT_USER_ACTIONS)) {
+      return reply.code(429).header("Retry-After", "60").send({ error: "rate_limit", retryAfterSeconds: 60 });
+    }
+
+    const uc = ce.userChallenge;
+    const rules = (uc?.rules as any) ?? (uc?.template as any)?.defaultRules ?? {};
+    if (rules.type !== "dice") {
+      return reply.code(400).send({ error: "Not a dice challenge" });
+    }
+
+    if (ce.paymentIntentId) {
+      return reply.send({ status: "already_committed", paymentIntentId: ce.paymentIntentId });
+    }
+
+    const amountRules = rules.amount ?? {};
+    const sides = Number(amountRules.sides ?? rules.sides ?? 6);
+    const unitAmountCents = Number(amountRules.unitAmountCents ?? rules.unitAmountCents ?? 100);
+    if (!Number.isFinite(sides) || sides <= 1) {
+      return reply.code(400).send({ error: "Invalid sides" });
+    }
+    if (!Number.isFinite(unitAmountCents) || unitAmountCents <= 0) {
+      return reply.code(400).send({ error: "Invalid unitAmountCents" });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: uc!.userId },
+      select: { tier: true, flags: true },
+    });
+    const rawFlags = (user?.flags as any) ?? {};
+    const tierMax =
+      typeof rawFlags.maxSingleDiceSaveCents === "number"
+        ? rawFlags.maxSingleDiceSaveCents
+        : user?.tier === "DEV"
+          ? 50_000
+          : user?.tier === "POWER"
+            ? 20_000
+            : 5_000;
+
+    const maxDiceSaveCents = Math.min(
+      Number(amountRules.maxAmountCents ?? 2000),
+      tierMax,
+    );
+
+    const roll = deterministicRoll({ userId: uc!.userId, eventId: ce.id, sides });
+    const rawCents = roll * unitAmountCents;
+    const amountCents = clampNumber(rawCents, 0, maxDiceSaveCents);
+    if (amountCents <= 0) {
+      return reply.code(400).send({ error: "Dice amount must be positive" });
+    }
+
+    await prisma.challengeEvent.update({
+      where: { id: ce.id },
+      data: {
+        amountCents,
+        metadata: {
+          ...(ce.metadata as any),
+          roll,
+          sides,
+          unitAmountCents,
+        },
+      },
+    });
+
+    const res = await commitChallengeEvent({
+      userId: uc!.userId,
+      userChallengeId: challengeId,
+      challengeEventId: ce.id,
+    });
+
+    return reply.send({
+      status: res.status,
+      paymentIntentId: res.paymentIntentId,
+      roll,
+      amountCents,
+    });
   } catch (err: any) {
     app.log.error(err);
     return reply.code(500).send({ error: err.message });

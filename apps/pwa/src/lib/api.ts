@@ -1,12 +1,15 @@
 const API = process.env.NEXT_PUBLIC_API_BASE!;
 
+const fetchOpts = (method: string, body?: any): RequestInit => ({
+  method,
+  headers: { "Content-Type": "application/json" },
+  body: body ? JSON.stringify(body) : undefined,
+  cache: "no-store",
+  credentials: "include",
+});
+
 async function req<T>(method: string, path: string, body?: any): Promise<T> {
-  const res = await fetch(`${API}${path}`, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-    cache: "no-store",
-  });
+  const res = await fetch(`${API}${path}`, fetchOpts(method, body));
 
   const text = await res.text();
   let data: any;
@@ -20,7 +23,112 @@ async function req<T>(method: string, path: string, body?: any): Promise<T> {
   return data as T;
 }
 
+export type TodayCard =
+  | {
+      type: "weather_wednesday";
+      challengeId: string;
+      eventId: string;
+      title: string;
+      prompt: string;
+      unit: "F" | "C";
+      maxAmountCents: number;
+      scale?: number;
+      choices?: Array<{ choice: string; amountCents: number }>;
+      scheduledFor: string;
+      needsInput: true;
+    }
+  | {
+      type: "temperature_daily";
+      challengeId: string;
+      userChallengeId: string;
+      eventId: string;
+      title: string;
+      prompt: string;
+      unit: "F" | "C";
+      maxAmountCents: number;
+      scale?: number;
+      availableScales?: number[];
+      scheduledFor: string;
+      needsInput: true;
+    }
+  | {
+      type: "dice_daily";
+      challengeId: string;
+      userChallengeId: string;
+      eventId: string;
+      title: string;
+      prompt: string;
+      sides: number;
+      unitAmountCents: number;
+      maxAmountCents: number;
+      scheduledFor: string;
+      needsInput: true;
+    }
+  | {
+      type: "envelopes_100";
+      challengeId: string;
+      userChallengeId: string;
+      title: string;
+      prompt: string;
+      needsInput: true;
+      remainingCount: number;
+      usedCount: number;
+      min: number;
+      max: number;
+      unitAmountCents: number;
+      maxDrawsPerDay?: number;
+      drewToday?: boolean;
+    }
+  | { type: string; [k: string]: any };
+
+export type TodayBanner =
+  | {
+      type: "commit_pending";
+      pendingCount: number;
+      label: string;
+      subLabel?: string;
+    }
+  | {
+      type: "needs_input";
+      pendingCount: number;
+      label: string;
+      subLabel?: string;
+    }
+  | { type: string; [k: string]: any };
+
+export type TodayResponse = {
+  userId: string;
+  banner?: TodayBanner;
+  cards: TodayCard[];
+};
+
+export type AuthMe = {
+  userId: string;
+  email?: string;
+  tier: string;
+  flags: Record<string, boolean>;
+};
+
 export const api = {
+  startAuth: (email: string, returnTo?: string | null) =>
+    req<{ ok: boolean }>("POST", "/auth/start", { email, returnTo: returnTo ?? undefined }),
+
+  getMe: async (): Promise<AuthMe> => {
+    const res = await fetch(`${API}/auth/me`, fetchOpts("GET"));
+    if (res.status === 401) throw new Error("unauthorized");
+    const text = await res.text();
+    let data: any;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+    if (!res.ok) throw new Error(typeof data === "string" ? data : JSON.stringify(data));
+    return data as AuthMe;
+  },
+
+  logout: () => req<{ ok: boolean }>("POST", "/auth/logout", {}),
+
   createUser: () => req<{ userId: string }>("POST", "/users", {}),
 
   getAccounts: (userId: string) => req<any>("GET", `/users/${userId}/accounts`),
@@ -36,14 +144,25 @@ export const api = {
       transactions: Array<{ occurredAt: string; type: string; amountCents: number; memo?: string }>;
     }>("GET", `/users/${userId}/transactions`),
 
-  startChallenge: (userId: string, templateSlug: string) =>
-    req<{ userChallengeId: string; nextRunAt?: string }>("POST", "/challenges/start", {
-      userId,
-      templateSlug,
-      startDate: new Date().toISOString(),
-    }),
+  startChallenge: (input: {
+    userId: string;
+    templateSlug: string;
+    settings?: Record<string, any>;
+    primeToday?: boolean;
+  }) =>
+    req<{ userChallengeId: string; nextRunAt?: string; primedEventId?: string }>(
+      "POST",
+      `/challenges/start?primeToday=${input.primeToday ? "true" : "false"}`,
+      {
+        userId: input.userId,
+        templateSlug: input.templateSlug,
+        startDate: new Date().toISOString(),
+        settings: input.settings ?? {},
+      },
+    ),
 
-  runDueChallenges: () => req<any>("POST", "/challenges/run-due", {}),
+  runDueChallenges: (userId: string) =>
+    req<any>("POST", `/users/${userId}/challenges/run-due`, {}),
 
   drawEnvelope: (challengeId: string) =>
     req<any>("POST", `/challenges/${challengeId}/draw`, {}),
@@ -69,4 +188,77 @@ export const api = {
 
   markWithdrawPaid: (paymentIntentId: string) =>
     req<any>("POST", "/webhooks/withdrawals/paid", { paymentIntentId }),
+
+  getTodayCards: (userId: string) =>
+    req<TodayResponse>("GET", `/users/${userId}/challenges/today`),
+
+  getHome: (userId: string) =>
+    req<{
+      config: { tier: string; flags: Record<string, boolean> };
+      streak: {
+        userId: string;
+        todayCompleted: boolean;
+        currentStreakDays: number;
+        bestStreakDays: number;
+        lastCompletedDateUtc: string | null;
+      };
+      stashBalanceCents: number;
+      stashAccountId: string;
+      today: { cards: TodayCard[]; banner?: TodayBanner };
+      activeChallenges: Array<{
+        userChallengeId: string;
+        name: string;
+        templateSlug: string | null;
+        progress?: string;
+      }>;
+    }>("GET", `/users/${userId}/home`),
+
+  getActiveChallenges: (userId: string) =>
+    req<{
+      userId: string;
+      challenges: Array<{
+        userChallengeId: string;
+        name: string;
+        templateSlug: string | null;
+        progress?: string;
+      }>;
+    }>("GET", `/users/${userId}/challenges/active`),
+
+  getStreak: (userId: string) =>
+    req<{
+      userId: string;
+      todayCompleted: boolean;
+      currentStreakDays: number;
+      bestStreakDays: number;
+      lastCompletedDateUtc: string | null;
+    }>("GET", `/users/${userId}/streak`),
+
+  setWeatherChoice: (challengeId: string, eventId: string, choice: string) =>
+    req<any>("POST", `/challenges/${challengeId}/events/${eventId}/set-weather`, { choice }),
+
+  setTemperature: (
+    challengeId: string,
+    eventId: string,
+    body:
+      | { mode: "manual"; temp: number; unit?: "F" | "C" }
+      | { mode: "gps"; lat: number; lon: number; unit?: "F" | "C" }
+      | { mode: "place"; zip?: string; query?: string; unit?: "F" | "C" },
+  ) => req<any>("POST", `/challenges/${challengeId}/events/${eventId}/set-temperature`, body),
+
+  updateChallengeSettings: (
+    userId: string,
+    userChallengeId: string,
+    body: { scaleOverride?: number },
+  ) =>
+    req<any>(
+      "PATCH",
+      `/users/${userId}/challenges/${userChallengeId}/settings`,
+      body,
+    ),
+
+  rollDiceEvent: (challengeId: string, eventId: string) =>
+    req<any>("POST", `/challenges/${challengeId}/events/${eventId}/roll`, {}),
+
+  commitPending: (userId: string, limit = 200) =>
+    req<any>("POST", `/users/${userId}/challenges/commit-pending?limit=${limit}`, {}),
 };
