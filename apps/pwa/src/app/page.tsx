@@ -5,6 +5,7 @@ import { useRouter, usePathname } from "next/navigation";
 import { api, TodayCard, TodayBanner } from "@/lib/api";
 import { getUserId, setUserId as saveUserId, clearUserId } from "@/lib/session";
 import { ApplyMissedSavesBanner } from "@/components/ApplyMissedSavesBanner";
+import { FundingCta } from "@/components/FundingCta";
 import { PushReminderToggle } from "@/components/PushReminderToggle";
 import { TodayCardRenderer } from "@/components/TodayCardRenderer";
 import { sortTodayCards } from "@/lib/todayOrder";
@@ -45,10 +46,18 @@ export default function Home() {
     currentStreakDays: number;
     bestStreakDays: number;
     lastCompletedDateUtc: string | null;
+    streakStatus?: "ok" | "needs_recovery" | "decayed";
+    streakShieldAvailable?: boolean;
+    recoveryTarget?: number | null;
   } | null>(null);
   const [prevTodayCompleted, setPrevTodayCompleted] = useState<boolean | null>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [resetsIn, setResetsIn] = useState<string>("");
+  const [fundingEnabled, setFundingEnabled] = useState<boolean>(false);
+  const [walletReady, setWalletReady] = useState<boolean>(false);
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [lastFundingRefreshAt, setLastFundingRefreshAt] = useState<string | null>(null);
+  const [fundingBusy, setFundingBusy] = useState<boolean>(false);
 
   const [depositDollars, setDepositDollars] = useState("10");
   const [withdrawDollars, setWithdrawDollars] = useState("5");
@@ -72,7 +81,11 @@ export default function Home() {
       setUser(uid);
       const home = await api.getHome(uid);
       setStashAccountId(home.stashAccountId);
-      setBalanceCents(home.stashBalanceCents);
+      setBalanceCents(home.stash?.totalDisplayCents ?? (home as any).stashBalanceCents ?? 0);
+      setFundingEnabled(!!(home as any).funding?.enabled);
+      setWalletReady(!!(home as any).wallet?.ready);
+      setWalletAddress((home as any).wallet?.address ?? null);
+      setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
       setTier(home.config.tier);
       setFlags(home.config.flags);
       setTodayCards(home.today.cards ?? []);
@@ -89,6 +102,40 @@ export default function Home() {
       return;
     }
     setStatus("");
+  }
+
+  async function ensureWalletThenRefresh() {
+    if (!userId) return;
+    setFundingBusy(true);
+    try {
+      await api.walletProvision(userId);
+      await refreshEverything();
+    } catch (e: any) {
+      setToastMsg(e?.message ?? "Wallet setup failed");
+    } finally {
+      setFundingBusy(false);
+    }
+  }
+
+  async function addMoneyRefresh(): Promise<
+    { status?: string; createdPaymentIntents?: number; deltaCents?: number } | void
+  > {
+    if (!userId) return;
+    setFundingBusy(true);
+    try {
+      const res = await api.fundingRefresh(userId, {
+        clientContext: { source: "pwa", flow: "fundcard", sessionHint: "fund_v1" },
+      });
+      const status = res?.result?.status ?? null;
+      const created = res?.result?.createdPaymentIntents ?? 0;
+      const deltaCents = res?.accounting?.deltaCents ?? res?.accounting?.unallocatedDeltaCents ?? 0;
+      return { status: status ?? undefined, createdPaymentIntents: created, deltaCents };
+    } catch (e: any) {
+      setToastMsg(e?.message ?? "Refresh failed");
+      return undefined;
+    } finally {
+      setFundingBusy(false);
+    }
   }
 
   async function refresh() {
@@ -138,7 +185,11 @@ export default function Home() {
           const home = await api.getHome(uid!);
           if (!alive) return;
           setStashAccountId(home.stashAccountId);
-          setBalanceCents(home.stashBalanceCents);
+          setBalanceCents(home.stash?.totalDisplayCents ?? (home as any).stashBalanceCents ?? 0);
+          setFundingEnabled(!!(home as any).funding?.enabled);
+          setWalletReady(!!(home as any).wallet?.ready);
+          setWalletAddress((home as any).wallet?.address ?? null);
+          setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
           setTier(home.config.tier);
           setFlags(home.config.flags);
           setTodayCards(home.today.cards ?? []);
@@ -207,7 +258,11 @@ export default function Home() {
     try {
       const home = await api.getHome(uid);
       setStashAccountId(home.stashAccountId);
-      setBalanceCents(home.stashBalanceCents);
+      setBalanceCents(home.stash?.totalDisplayCents ?? (home as any).stashBalanceCents ?? 0);
+      setFundingEnabled(!!(home as any).funding?.enabled);
+      setWalletReady(!!(home as any).wallet?.ready);
+      setWalletAddress((home as any).wallet?.address ?? null);
+      setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
       setTier(home.config.tier);
       setFlags(home.config.flags);
       setTodayCards(home.today.cards ?? []);
@@ -275,18 +330,31 @@ export default function Home() {
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h1 className="text-3xl font-bold">My Stash Jar</h1>
           {streak && (
-            <div className="text-right text-sm">
+            <div className="text-right text-sm space-y-0.5">
               <span className="font-medium">🔥 {streak.currentStreakDays}-day streak</span>
               {streak.bestStreakDays > 0 && (
                 <p className="text-xs opacity-70">Best: {streak.bestStreakDays}</p>
               )}
-              {!streak.todayCompleted && (
+              {streak.streakStatus === "needs_recovery" && streak.recoveryTarget != null && (
+                <p className="text-xs font-medium text-amber-700 bg-amber-100 rounded px-1.5 py-0.5 inline-block">
+                  Recover streak ({streak.recoveryTarget} saves)
+                </p>
+              )}
+              {streak.streakShieldAvailable && streak.streakStatus === "ok" && (
+                <p className="text-xs opacity-70">🛡️ Shield ready</p>
+              )}
+              {!streak.todayCompleted && streak.streakStatus !== "needs_recovery" && (
                 <p className="text-xs opacity-70 mt-0.5">Save today to keep it alive</p>
               )}
             </div>
           )}
         </div>
-        <p className="text-sm opacity-70">Tier: {tier}</p>
+        <p className="text-sm opacity-70 flex items-center gap-2">
+          Tier: {tier}
+          {(tier === "POWER" || tier === "DEV") && (
+            <span className="text-xs font-medium bg-violet-100 text-violet-800 rounded px-1.5 py-0.5">POWER</span>
+          )}
+        </p>
       </header>
 
       {userId && (
@@ -298,6 +366,20 @@ export default function Home() {
         <div className="text-4xl font-bold">{fmt(balanceCents)}</div>
         {status && <div className="text-sm opacity-70">{status}</div>}
       </section>
+
+      {userId && (
+        <FundingCta
+          walletAddress={walletAddress}
+          enabled={fundingEnabled}
+          lastRefreshAt={lastFundingRefreshAt}
+          busy={fundingBusy}
+          onSetUpWallet={ensureWalletThenRefresh}
+          onAddMoney={addMoneyRefresh}
+          onRefreshHome={refreshEverything}
+          walletReady={walletReady}
+          setToast={setToastMsg}
+        />
+      )}
 
       {todayError && (
         <section className="rounded-xl border p-5 text-sm text-red-600">
@@ -350,6 +432,9 @@ export default function Home() {
               : "";
           return (
             <div key={key} id={id} className={highlight}>
+              {(tier === "POWER" || tier === "DEV") && (
+                <span className="text-xs font-medium text-violet-600 mb-1 inline-block">POWER</span>
+              )}
               <TodayCardRenderer userId={userId} card={card} onDone={refreshEverything} />
             </div>
           );

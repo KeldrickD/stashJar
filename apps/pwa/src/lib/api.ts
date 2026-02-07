@@ -63,6 +63,8 @@ export type TodayCard =
       maxAmountCents: number;
       scheduledFor: string;
       needsInput: true;
+      multiDice?: number;
+      multiplier?: number;
     }
   | {
       type: "envelopes_100";
@@ -194,15 +196,46 @@ export const api = {
 
   getHome: (userId: string) =>
     req<{
+      userId?: string;
       config: { tier: string; flags: Record<string, boolean> };
+      wallet?: {
+        ready: boolean;
+        provisioning?: boolean;
+        type: "SMART" | "EXTERNAL";
+        chain: string;
+        address: string | null;
+      };
+      funding?: {
+        enabled: boolean;
+        provider?: string;
+        rail?: string;
+        minDepositCents?: number;
+        maxDepositCents?: number;
+        reason?: "not_configured" | "wallet_not_ready";
+        lastRefreshAt?: string | null;
+        lastObservedBalanceMicros?: string | null;
+        ui?: { primaryCtaLabel: string; secondaryCtaLabel: string };
+      };
       streak: {
-        userId: string;
+        userId?: string;
         todayCompleted: boolean;
         currentStreakDays: number;
         bestStreakDays: number;
         lastCompletedDateUtc: string | null;
+        streakStatus?: "ok" | "needs_recovery" | "decayed";
+        streakShieldAvailable?: boolean;
+        streakShieldUsedAtUtc?: string | null;
+        recoveryTarget?: number | null;
       };
-      stashBalanceCents: number;
+      stash: {
+        stashBalanceCents: number;
+        vaultValueCents: number;
+        totalDisplayCents: number;
+        lastMarkedAt: string | null;
+        markAgeSeconds: number | null;
+        isStale: boolean;
+        details?: Record<string, unknown>;
+      };
       stashAccountId: string;
       today: { cards: TodayCard[]; banner?: TodayBanner };
       activeChallenges: Array<{
@@ -212,6 +245,16 @@ export const api = {
         progress?: string;
       }>;
     }>("GET", `/users/${userId}/home`),
+
+  fundingRefresh: (userId: string, body?: { mode?: string; clientContext?: Record<string, string> }) =>
+    req<any>("POST", `/users/${userId}/funding/refresh`, body ?? {}),
+
+  walletProvision: (userId: string) =>
+    req<{ ok: boolean; wallet: { address: string; walletType: string; chain: string } }>(
+      "POST",
+      `/users/${userId}/wallet/provision`,
+      {},
+    ),
 
   getActiveChallenges: (userId: string) =>
     req<{
@@ -231,6 +274,10 @@ export const api = {
       currentStreakDays: number;
       bestStreakDays: number;
       lastCompletedDateUtc: string | null;
+      streakStatus?: "ok" | "needs_recovery" | "decayed";
+      streakShieldAvailable?: boolean;
+      streakShieldUsedAtUtc?: string | null;
+      recoveryTarget?: number | null;
     }>("GET", `/users/${userId}/streak`),
 
   setWeatherChoice: (challengeId: string, eventId: string, choice: string) =>

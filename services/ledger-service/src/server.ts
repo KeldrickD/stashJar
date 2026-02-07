@@ -7,8 +7,14 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { z } from "zod";
 import { resolveFlags } from "./lib/tier";
 import { getChallengeDueWindow } from "./lib/challengeDue";
+import { isFundingConfigured, getUsdcBalanceMicros } from "./lib/chainRead";
+import { deterministicWalletProvider } from "./lib/walletProvider";
 import { isAddress } from "viem";
-import { sendMagicLinkEmail as sendMagicLinkEmailResend } from "./email/resend";
+import {
+  sendMagicLinkEmail as sendMagicLinkEmailResend,
+  sendWeeklyRecapEmail,
+  type WeeklyRecapPayload,
+} from "./email/resend";
 import webpush from "web-push";
 
 const EnvSchema = z.object({
@@ -131,8 +137,10 @@ function ifNoneMatch(req: any): string | null {
 const RATE_WINDOW_MS = 60_000;
 const RATE_LIMIT_IP = 60;
 const RATE_LIMIT_USER_ACTIONS = 30;
+const RATE_LIMIT_FUNDING_REFRESH = 10;
 const rateLimitIP = new Map<string, { count: number; resetAt: number }>();
 const rateLimitUser = new Map<string, { count: number; resetAt: number }>();
+const rateLimitFundingRefresh = new Map<string, { count: number; resetAt: number }>();
 
 function checkRateLimit(key: string, map: Map<string, { count: number; resetAt: number }>, limit: number): boolean {
   const now = Date.now();
@@ -365,12 +373,41 @@ function clampNumber(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
-function deterministicRoll(params: { userId: string; eventId: string; sides: number }) {
+function deterministicRoll(params: { userId: string; eventId: string; sides: number }): number {
   const salt = process.env.DICE_SALT ?? "dev_salt";
   const input = `${salt}:${params.userId}:${params.eventId}`;
   const hash = crypto.createHash("sha256").update(input).digest("hex");
   const n = BigInt(`0x${hash}`);
   return Number(n % BigInt(params.sides)) + 1;
+}
+
+/** POWER dice: optional multi-dice (sum) or ×10 multiplier. Returns { roll, rollBreakdown? }. */
+function resolveDiceRoll(params: {
+  userId: string;
+  eventId: string;
+  sides: number;
+  multiDice?: number;
+}): { roll: number; rollBreakdown?: number[] } {
+  const count = Math.max(1, Math.min(2, Number(params.multiDice ?? 1)));
+  if (count === 1) {
+    const roll = deterministicRoll({
+      userId: params.userId,
+      eventId: params.eventId,
+      sides: params.sides,
+    });
+    return { roll };
+  }
+  const a = deterministicRoll({
+    userId: params.userId,
+    eventId: `${params.eventId}:d1`,
+    sides: params.sides,
+  });
+  const b = deterministicRoll({
+    userId: params.userId,
+    eventId: `${params.eventId}:d2`,
+    sides: params.sides,
+  });
+  return { roll: a + b, rollBreakdown: [a, b] };
 }
 
 function toTempF(value: number, unit: "F" | "C") {
@@ -645,17 +682,48 @@ async function commitChallengeEvent(params: {
       },
     });
 
-    // Streak: first challenge save this UTC day extends or starts streak
+    // Streak: first challenge save this UTC day extends or starts streak; POWER shield recovery consumes on 2 saves
     if (didSettle) {
       const now = new Date();
+      const dayStart = utcDateOnly(now);
+      const dayEnd = addDaysUtc(dayStart, 1);
       const todayStr = toDateStringUtc(now);
-      const yesterdayStr = toDateStringUtc(addDaysUtc(utcDateOnly(now), -1));
-      const user = await tx.user.findUnique({ where: { id: userId } });
+      const yesterdayStr = toDateStringUtc(addDaysUtc(dayStart, -1));
+      const user = await tx.user.findUnique({
+        where: { id: userId },
+        select: {
+          tier: true,
+          lastStreakDateUtc: true,
+          currentStreakDays: true,
+          bestStreakDays: true,
+          streakShieldAvailable: true,
+          streakShieldUsedAtUtc: true,
+        },
+      });
       if (user) {
         const u = user as any;
-        const last = u.lastStreakDateUtc as string | null | undefined;
+        const tier = u.tier ?? "NORMIE";
+        const last = u.lastStreakDateUtc ?? null;
         const current = typeof u.currentStreakDays === "number" ? u.currentStreakDays : 0;
         const best = typeof u.bestStreakDays === "number" ? u.bestStreakDays : 0;
+        const shieldUsedAt = u.streakShieldUsedAtUtc ?? null;
+        const isPower = tier === "POWER" || tier === "DEV";
+        let clearShield = false;
+        if (isPower && shieldUsedAt) {
+          const recoveryDay = toDateStringUtc(addDaysUtc(new Date(shieldUsedAt + "T12:00:00.000Z"), 1));
+          if (todayStr === recoveryDay) {
+            const todaySaves = await tx.paymentIntent.count({
+              where: {
+                userId,
+                type: "DEPOSIT",
+                status: "SETTLED",
+                createdAt: { gte: dayStart, lt: dayEnd },
+                metadata: { path: ["source"], equals: "challenge" },
+              },
+            });
+            if (todaySaves >= 2) clearShield = true;
+          }
+        }
         let newCurrent: number;
         if (last === todayStr) newCurrent = current;
         else if (last === yesterdayStr) newCurrent = current + 1;
@@ -667,6 +735,7 @@ async function commitChallengeEvent(params: {
             lastStreakDateUtc: todayStr,
             currentStreakDays: newCurrent,
             bestStreakDays: newBest,
+            ...(clearShield ? { streakShieldAvailable: false, streakShieldUsedAtUtc: null } : {}),
           } as any,
         });
       }
@@ -1027,19 +1096,72 @@ app.post("/auth/logout", async (req, reply) => {
   return reply.send({ ok: true });
 });
 
+const MIN_DEPOSIT_CENTS = 100;
+const MAX_DEPOSIT_CENTS = 500_000; // $5k
+
+function buildWalletAndFunding(
+  user: {
+    wallet?: {
+      address: string;
+      walletType: string;
+      chain: string;
+      lastFundingRefreshAt?: Date | null;
+      lastObservedBalanceMicros?: string | null;
+    } | null;
+  },
+  flags: Record<string, boolean>,
+) {
+  const uw = user.wallet;
+  const ready = !!uw?.address;
+  const fundingConfigured = isFundingConfigured();
+  const showAddress = flags.showVaultShares || flags.showCryptoLabels;
+
+  const wallet = {
+    ready,
+    provisioning: false,
+    type: (uw?.walletType ?? "SMART") as "SMART" | "EXTERNAL",
+    chain: (uw?.chain ?? "base") as string,
+    address: showAddress || ready ? (uw?.address ?? null) : null,
+  };
+
+  const funding = fundingConfigured && ready
+    ? {
+        enabled: true,
+        provider: "coinbase",
+        rail: "USDC",
+        minDepositCents: MIN_DEPOSIT_CENTS,
+        maxDepositCents: MAX_DEPOSIT_CENTS,
+        requiresKyc: false,
+        sessionHint: "fund_v1",
+        lastRefreshAt: uw?.lastFundingRefreshAt?.toISOString() ?? null,
+        lastObservedBalanceMicros: uw?.lastObservedBalanceMicros ?? null,
+        ui: { primaryCtaLabel: "Add money", secondaryCtaLabel: "Withdraw" },
+      }
+    : {
+        enabled: false,
+        reason: (!fundingConfigured ? "not_configured" : "wallet_not_ready") as "not_configured" | "wallet_not_ready",
+      };
+
+  return { wallet, funding };
+}
+
 app.get("/auth/me", async (req, reply) => {
   const devUserId = IS_DEV && (req.headers["x-user-id"] as string)?.trim();
   if (devUserId) {
     const user = await prisma.user.findUnique({
       where: { id: devUserId },
-      select: { id: true, email: true, tier: true, flags: true },
+      select: { id: true, email: true, tier: true, flags: true, wallet: true },
     });
     if (user) {
+      const flags = resolveFlags(user.tier as any, user.flags);
+      const { wallet, funding } = buildWalletAndFunding(user, flags);
       return reply.send({
         userId: user.id,
         email: user.email ?? undefined,
         tier: user.tier,
-        flags: resolveFlags(user.tier as any, user.flags),
+        flags,
+        wallet,
+        funding,
       });
     }
   }
@@ -1049,14 +1171,18 @@ app.get("/auth/me", async (req, reply) => {
   if (!sessionHash) return reply.code(503).send({ error: "auth_not_configured" });
   const session = await prisma.session.findFirst({
     where: { sessionHash, revokedAt: null, expiresAt: { gt: new Date() } },
-    include: { user: { select: { id: true, email: true, tier: true, flags: true } } },
+    include: { user: { select: { id: true, email: true, tier: true, flags: true, wallet: true } } },
   });
   if (!session) return reply.code(401).send({ error: "unauthorized" });
+  const flags = resolveFlags(session.user.tier as any, session.user.flags);
+  const { wallet, funding } = buildWalletAndFunding(session.user, flags);
   return reply.send({
     userId: session.user.id,
     email: session.user.email ?? undefined,
     tier: session.user.tier,
-    flags: resolveFlags(session.user.tier as any, session.user.flags),
+    flags,
+    wallet,
+    funding,
   });
 });
 
@@ -1906,9 +2032,13 @@ app.post("/admin/users/set-tier", async (req, reply) => {
   const parsed = SetTierSchema.safeParse(req.body);
   if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
 
+  const data: any = { tier: parsed.data.tier };
+  if (parsed.data.tier === "POWER") {
+    data.streakShieldAvailable = true;
+  }
   const u = await prisma.user.update({
     where: { id: parsed.data.userId },
-    data: { tier: parsed.data.tier },
+    data,
   });
 
   return { ok: true, userId: u.id, tier: u.tier };
@@ -2494,6 +2624,8 @@ async function buildTodayCards(
         scheduledFor: ev.scheduledFor.toISOString(),
         needsInput: true,
         maxAmountCents: amount.maxAmountCents ?? 2000,
+        ...(amount.multiDice >= 2 && { multiDice: 2 }),
+        ...(amount.multiplier >= 10 && { multiplier: 10 }),
       });
     }
   }
@@ -2511,15 +2643,32 @@ async function buildTodayCards(
     const min = Number(rules.min ?? 1);
     const max = Number(rules.max ?? 100);
     const usedCount = state?.used?.length ?? 0;
-    const drawsTodayCount = await prisma.challengeEvent.count({
-      where: {
-        userChallengeId: uc.id,
-        createdAt: { gte: dayStartForEnvelopes, lt: dayEndForEnvelopes },
-      },
-    });
-    const drewToday = drawsTodayCount >= 1;
-    // Route A: Today = actionable only — omit envelope card when already drew today
-    if (!drewToday) {
+    const cadence = rules.cadence ?? "daily";
+    const maxDrawsPerDay = Number(rules.maxDrawsPerDay ?? 1);
+    let drewToday = false;
+    let canDraw = false;
+    if (cadence === "weekly") {
+      const weekStart = startOfWeekUtc(now);
+      const weekEnd = addDaysUtc(weekStart, 7);
+      const drawsThisWeek = await prisma.challengeEvent.count({
+        where: {
+          userChallengeId: uc.id,
+          createdAt: { gte: weekStart, lt: weekEnd },
+        },
+      });
+      canDraw = drawsThisWeek < 1;
+      drewToday = drawsThisWeek >= 1;
+    } else {
+      const drawsTodayCount = await prisma.challengeEvent.count({
+        where: {
+          userChallengeId: uc.id,
+          createdAt: { gte: dayStartForEnvelopes, lt: dayEndForEnvelopes },
+        },
+      });
+      drewToday = drawsTodayCount >= maxDrawsPerDay;
+      canDraw = !drewToday;
+    }
+    if (canDraw) {
       cards.push({
         type: "envelopes_100",
         title: uc?.name ?? "100 Envelopes",
@@ -2532,8 +2681,10 @@ async function buildTodayCards(
         min,
         max,
         unitAmountCents: Number(rules.unitAmountCents ?? 100),
-        maxDrawsPerDay: 1,
+        maxDrawsPerDay: cadence === "weekly" ? 0 : maxDrawsPerDay,
         drewToday,
+        ...(cadence === "weekly" && { cadence: "weekly" }),
+        ...(rules.order === "reverse" && { order: "reverse" }),
       });
     }
   }
@@ -2734,16 +2885,41 @@ async function getActiveChallengesForUser(userId: string): Promise<{
   return { userId, challenges: list };
 }
 
+async function getChallengeSavesCountForDate(userId: string, dateStr: string): Promise<number> {
+  const dayStart = new Date(dateStr + "T00:00:00.000Z");
+  const dayEnd = addDaysUtc(dayStart, 1);
+  return prisma.paymentIntent.count({
+    where: {
+      userId,
+      type: "DEPOSIT",
+      status: "SETTLED",
+      createdAt: { gte: dayStart, lt: dayEnd },
+      metadata: { path: ["source"], equals: "challenge" },
+    },
+  });
+}
+
 async function getStreakForUser(userId: string): Promise<{
   userId: string;
   todayCompleted: boolean;
   currentStreakDays: number;
   bestStreakDays: number;
   lastCompletedDateUtc: string | null;
+  streakStatus: "ok" | "needs_recovery" | "decayed";
+  streakShieldAvailable: boolean;
+  streakShieldUsedAtUtc: string | null;
+  recoveryTarget: number | null;
 } | null> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { currentStreakDays: true, bestStreakDays: true, lastStreakDateUtc: true },
+    select: {
+      tier: true,
+      currentStreakDays: true,
+      bestStreakDays: true,
+      lastStreakDateUtc: true,
+      streakShieldAvailable: true,
+      streakShieldUsedAtUtc: true,
+    },
   });
   if (!user) return null;
 
@@ -2753,30 +2929,77 @@ async function getStreakForUser(userId: string): Promise<{
   const todayStr = toDateStringUtc(now);
   const yesterdayStr = toDateStringUtc(addDaysUtc(dayStart, -1));
 
-  const todayCount = await prisma.paymentIntent.count({
-    where: {
-      userId,
-      type: "DEPOSIT",
-      status: "SETTLED",
-      createdAt: { gte: dayStart, lt: dayEnd },
-      metadata: { path: ["source"], equals: "challenge" },
-    },
-  });
+  const todayCount = await getChallengeSavesCountForDate(userId, todayStr);
   const todayCompleted = todayCount >= 1;
 
   const u = user as any;
+  const tier = u.tier ?? "NORMIE";
   const last = u.lastStreakDateUtc ?? null;
   const storedCurrent = u.currentStreakDays ?? 0;
   const best = u.bestStreakDays ?? 0;
+  let streakShieldAvailable = Boolean(u.streakShieldAvailable);
+  let streakShieldUsedAtUtc: string | null = u.streakShieldUsedAtUtc ?? null;
 
   const streakValid = last === todayStr || last === yesterdayStr;
   let currentStreakDays = storedCurrent;
+  let streakStatus: "ok" | "needs_recovery" | "decayed" = "ok";
+  let recoveryTarget: number | null = null;
+
   if (!streakValid && storedCurrent > 0) {
-    await prisma.user.update({
-      where: { id: userId },
-      data: { currentStreakDays: 0 } as any,
-    });
-    currentStreakDays = 0;
+    const isPower = tier === "POWER" || tier === "DEV";
+    const missedDay = yesterdayStr;
+
+    if (isPower && streakShieldAvailable && !streakShieldUsedAtUtc) {
+      streakShieldUsedAtUtc = missedDay;
+      await prisma.user.update({
+        where: { id: userId },
+        data: { streakShieldUsedAtUtc: missedDay } as any,
+      });
+      streakStatus = "needs_recovery";
+      recoveryTarget = 2;
+    } else if (isPower && streakShieldUsedAtUtc) {
+      const recoveryDay = toDateStringUtc(addDaysUtc(new Date(streakShieldUsedAtUtc + "T12:00:00.000Z"), 1));
+      if (todayStr > recoveryDay) {
+        const recoverySaves = await getChallengeSavesCountForDate(userId, recoveryDay);
+        if (recoverySaves >= 2) {
+          streakShieldAvailable = false;
+          streakShieldUsedAtUtc = null;
+          await prisma.user.update({
+            where: { id: userId },
+            data: { streakShieldAvailable: false, streakShieldUsedAtUtc: null } as any,
+          });
+        } else {
+          currentStreakDays = 0;
+          streakShieldAvailable = false;
+          streakShieldUsedAtUtc = null;
+          streakStatus = "decayed";
+          await prisma.user.update({
+            where: { id: userId },
+            data: { currentStreakDays: 0, streakShieldAvailable: false, streakShieldUsedAtUtc: null } as any,
+          });
+        }
+      } else if (todayStr === recoveryDay) {
+        streakStatus = "needs_recovery";
+        recoveryTarget = 2;
+      }
+    } else {
+      if (streakShieldUsedAtUtc) {
+        await prisma.user.update({
+          where: { id: userId },
+          data: { currentStreakDays: 0, streakShieldUsedAtUtc: null } as any,
+        });
+      } else {
+        await prisma.user.update({
+          where: { id: userId },
+          data: { currentStreakDays: 0 } as any,
+        });
+      }
+      currentStreakDays = 0;
+      streakStatus = "decayed";
+    }
+  } else if (streakValid && streakShieldUsedAtUtc && (tier === "POWER" || tier === "DEV") && todayStr === toDateStringUtc(addDaysUtc(new Date(streakShieldUsedAtUtc + "T12:00:00.000Z"), 1))) {
+    streakStatus = "needs_recovery";
+    recoveryTarget = 2;
   }
 
   return {
@@ -2785,6 +3008,10 @@ async function getStreakForUser(userId: string): Promise<{
     currentStreakDays,
     bestStreakDays: best,
     lastCompletedDateUtc: last,
+    streakStatus,
+    streakShieldAvailable,
+    streakShieldUsedAtUtc,
+    recoveryTarget,
   };
 }
 
@@ -2808,7 +3035,7 @@ app.get("/users/:userId/home", { preHandler: [requireAuth, requireUserIdMatch] }
 
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { tier: true, flags: true },
+    select: { tier: true, flags: true, wallet: true },
   });
   if (!user) return reply.code(404).send({ error: "User not found" });
 
@@ -2833,15 +3060,52 @@ app.get("/users/:userId/home", { preHandler: [requireAuth, requireUserIdMatch] }
   });
   const stashBalanceCents = stashAgg._sum.amountCents ?? 0;
 
+  const vp = await prisma.vaultPosition.findUnique({ where: { userId } });
+  const vaultMicros = vp?.currentValueUsdcMicros ? BigInt(vp.currentValueUsdcMicros) : 0n;
+  const vaultValueCents = Number(vaultMicros / 10_000n);
+  const totalDisplayCents = stashBalanceCents + vaultValueCents;
+
   const config = {
     tier: user.tier,
     flags: resolveFlags(user.tier as any, user.flags),
   };
+  const flags = config.flags as Record<string, boolean>;
+  const { wallet, funding } = buildWalletAndFunding(user, flags);
+
+  const stash: Record<string, unknown> = {
+    stashBalanceCents,
+    vaultValueCents,
+    totalDisplayCents,
+    lastMarkedAt: vp?.lastMarkedAt ?? null,
+    markAgeSeconds: vp?.lastMarkedAt
+      ? Math.floor((Date.now() - vp.lastMarkedAt.getTime()) / 1000)
+      : null,
+    isStale: !vp?.lastMarkedAt || Date.now() - vp.lastMarkedAt.getTime() > 5 * 60 * 1000,
+  };
+  if (flags.showVaultShares || flags.showChainName || flags.showYieldSource || flags.showTxHistory) {
+    const latestAction = await prisma.onchainAction.findFirst({
+      where: { userId, txHash: { not: null } },
+      orderBy: { updatedAt: "desc" },
+    });
+    (stash as any).details = {
+      ...(flags.showVaultShares && {
+        vaultShares: vp?.shares ?? null,
+        vaultValueUsdcMicros: vp?.currentValueUsdcMicros ?? null,
+        vaultAddress: vp?.vaultAddress ?? null,
+      }),
+      ...(flags.showChainName && { chain: latestAction?.chain ?? "base" }),
+      ...(flags.showYieldSource && { yieldSource: "USDC Vault" }),
+      ...(flags.showTxHistory && { lastTxHash: latestAction?.txHash ?? null }),
+    };
+  }
 
   const payload = {
+    userId,
     config,
+    wallet,
+    funding,
     streak,
-    stashBalanceCents,
+    stash,
     stashAccountId,
     today: { cards: today.cards, banner: today.banner },
     activeChallenges: activeChallenges.challenges,
@@ -2858,6 +3122,176 @@ app.get("/users/:userId/home", { preHandler: [requireAuth, requireUserIdMatch] }
   reply.header("X-Build", BUILD_TIMESTAMP);
   reply.header("Cache-Control", "no-store");
   return reply.send(payload);
+});
+
+// --- Funding refresh: turn wallet USDC balance into ledger deposit intents (idempotent) ---
+app.post("/users/:userId/funding/refresh", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
+  const userId = (req.params as any).userId as string;
+  if (!isFundingConfigured()) {
+    return reply.code(503).send({ error: "funding_disabled" });
+  }
+  if (!checkRateLimit(`funding_refresh:${userId}`, rateLimitFundingRefresh, RATE_LIMIT_FUNDING_REFRESH)) {
+    return reply.code(429).header("Retry-After", "60").send({ error: "rate_limit", retryAfterSeconds: 60 });
+  }
+
+  const uw = await prisma.userWallet.findUnique({ where: { userId } });
+  if (!uw) {
+    return reply.code(409).send({ error: "wallet_not_ready" });
+  }
+
+  const balanceMicros = await getUsdcBalanceMicros(uw.address);
+  if (balanceMicros === null) {
+    return reply.code(503).send({ error: "chain_unavailable" });
+  }
+
+  const accountedBefore = BigInt(uw.accountedPrincipalUsdcMicros ?? "0");
+  const deltaMicros = balanceMicros > accountedBefore ? balanceMicros - accountedBefore : 0n;
+  const deltaCents = Math.floor(Number(deltaMicros / 10_000n));
+  const minCents = MIN_DEPOSIT_CENTS;
+  const maxCents = Math.min(MAX_DEPOSIT_CENTS, deltaCents);
+  const asOf = new Date();
+
+  const updateRefreshMeta = () =>
+    prisma.userWallet.update({
+      where: { userId },
+      data: {
+        lastFundingRefreshAt: asOf,
+        lastObservedBalanceMicros: balanceMicros.toString(),
+      },
+    });
+
+  if (maxCents < minCents) {
+    await updateRefreshMeta();
+    return reply.send({
+      userId,
+      wallet: { chain: uw.chain, address: uw.address },
+      observed: { walletUsdcBalanceMicros: balanceMicros.toString(), asOf: asOf.toISOString() },
+      accounting: {
+        accountedPrincipalUsdcMicrosBefore: accountedBefore.toString(),
+        accountedPrincipalUsdcMicrosAfter: accountedBefore.toString(),
+        deltaMicros: "0",
+        deltaCents: 0,
+      },
+      result: { createdPaymentIntents: 0, paymentIntentIds: [], status: "NO_CHANGE" },
+    });
+  }
+
+  const idempotencyKey = `funding_refresh_${userId}_${accountedBefore}_${balanceMicros}`;
+  let pi: any = null;
+  try {
+    pi = await createDepositIntentAndLedger({
+      userId,
+      amountCents: maxCents,
+      idempotencyKey,
+      metadata: { source: "funding", fundingWalletAddress: uw.address },
+    });
+  } catch (e: any) {
+    if (e?.code === "P2002" || e?.message?.includes("Unique constraint")) {
+      await updateRefreshMeta();
+      return reply.send({
+        userId,
+        wallet: { chain: uw.chain, address: uw.address },
+        observed: { walletUsdcBalanceMicros: balanceMicros.toString(), asOf: asOf.toISOString() },
+        accounting: {
+          accountedPrincipalUsdcMicrosBefore: accountedBefore.toString(),
+          accountedPrincipalUsdcMicrosAfter: accountedBefore.toString(),
+          deltaMicros: deltaMicros.toString(),
+          deltaCents,
+        },
+        result: { createdPaymentIntents: 0, paymentIntentIds: [], status: "NO_CHANGE" },
+      });
+    }
+    throw e;
+  }
+
+  const userStashId = await getUserStashAccountId(userId);
+  const pendingDepositId = await getSystemAccountId(AccountType.PENDING_DEPOSIT);
+  const settleIdempo = `settle_${pi.id}`;
+  const accountedAfter = accountedBefore + BigInt(pi.amountCents) * 10_000n;
+  await prisma.$transaction(async (tx) => {
+    const existingJE = await tx.journalEntry.findUnique({ where: { idempotencyKey: settleIdempo } });
+    let jeId: string;
+    if (!existingJE) {
+      const je = await tx.journalEntry.create({
+        data: {
+          idempotencyKey: settleIdempo,
+          type: EntryType.DEPOSIT_SETTLED,
+          metadata: { paymentIntentId: pi.id, provider: "coinbase_funding", providerRef: "onramp" },
+          lines: {
+            create: [
+              { accountId: userStashId, amountCents: pi.amountCents, memo: "Deposit settled" },
+              { accountId: pendingDepositId, amountCents: -pi.amountCents, memo: "Release pending" },
+            ],
+          },
+        },
+      });
+      jeId = je.id;
+    } else {
+      jeId = existingJE.id;
+    }
+    await tx.paymentIntent.update({
+      where: { id: pi.id },
+      data: { status: "SETTLED", provider: "coinbase_funding", providerRef: "onramp", settledEntryId: jeId },
+    });
+    await tx.userWallet.update({
+      where: { userId },
+      data: {
+        accountedPrincipalUsdcMicros: accountedAfter.toString(),
+        lastFundingRefreshAt: asOf,
+        lastObservedBalanceMicros: balanceMicros.toString(),
+      },
+    });
+  });
+
+  return reply.send({
+    userId,
+    wallet: { chain: uw.chain, address: uw.address },
+    observed: { walletUsdcBalanceMicros: balanceMicros.toString(), asOf: asOf.toISOString() },
+    accounting: {
+      accountedPrincipalUsdcMicrosBefore: accountedBefore.toString(),
+      accountedPrincipalUsdcMicrosAfter: accountedAfter.toString(),
+      deltaMicros: deltaMicros.toString(),
+      deltaCents,
+    },
+    result: {
+      createdPaymentIntents: 1,
+      paymentIntentIds: [pi.id],
+      status: "SETTLED",
+    },
+  });
+});
+
+// --- Wallet provision (WalletProvider abstraction; default = deterministic dev) ---
+const walletProvider = deterministicWalletProvider;
+
+app.post("/users/:userId/wallet/provision", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
+  const userId = (req.params as any).userId as string;
+  const existing = await prisma.userWallet.findUnique({ where: { userId } });
+  if (existing) {
+    return reply.send({
+      ok: true,
+      wallet: {
+        address: existing.address,
+        walletType: existing.walletType,
+        chain: existing.chain,
+        providerRef: existing.providerRef ?? undefined,
+      },
+    });
+  }
+  const { address, providerRef } = await walletProvider.createSmartWallet(userId);
+  await prisma.userWallet.create({
+    data: {
+      userId,
+      address,
+      walletType: "SMART",
+      chain: "base",
+      providerRef: providerRef ?? undefined,
+    },
+  });
+  return reply.send({
+    ok: true,
+    wallet: { address, walletType: "SMART", chain: "base", providerRef: providerRef ?? undefined },
+  });
 });
 
 const UpdateChallengeSettingsSchema = z.object({
@@ -2920,6 +3354,7 @@ const StartChallengeSchema = z.object({
   startDate: z.string().datetime().optional(), // default now
   name: z.string().optional(),
   settings: z.record(z.any()).optional(),
+  ruleOverrides: z.record(z.any()).optional(), // POWER: e.g. { amount: { sides: 12, multiDice: 2 } }
 });
 
 function computeNextWeeklyRun(start: Date, weekday: number) {
@@ -2957,7 +3392,36 @@ app.post("/challenges/start", { preHandler: [requireAuth] }, async (req, reply) 
   });
   if (!template) return reply.code(404).send({ error: "Template not found" });
 
-  const rules = template.defaultRules as any;
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { tier: true },
+  });
+  const tier = (user?.tier as string) ?? "NORMIE";
+  const isPowerOrDev = tier === "POWER" || tier === "DEV";
+
+  let rules = { ...(template.defaultRules as any) };
+  const overrides = (parsed.data.ruleOverrides ?? {}) as Record<string, any>;
+  if (Object.keys(overrides).length > 0) {
+    if (!isPowerOrDev) {
+      return reply.code(403).send({ error: "Rule overrides are only available on POWER tier" });
+    }
+    if (overrides.amount && (rules.type === "dice" || templateSlug === "dice_daily" || templateSlug === "dice")) {
+      const allowedSides = [6, 12, 20, 100];
+      const sides = Number(overrides.amount.sides ?? rules.amount?.sides ?? rules.sides ?? 6);
+      if (!allowedSides.includes(sides)) overrides.amount.sides = 6;
+      if (overrides.amount.multiDice >= 2 && overrides.amount.multiplier >= 10) {
+        delete overrides.amount.multiplier;
+      }
+      rules.amount = { ...(rules.amount ?? {}), ...overrides.amount };
+    }
+    if ((templateSlug === "100_envelopes" || rules.type === "envelopes") && overrides) {
+      if (typeof overrides.maxDrawsPerDay === "number" && overrides.maxDrawsPerDay <= 2)
+        rules.maxDrawsPerDay = overrides.maxDrawsPerDay;
+      if (overrides.cadence === "weekly") rules.cadence = "weekly";
+      if (overrides.order === "reverse") rules.order = "reverse";
+    }
+    if (overrides.schedule) rules.schedule = { ...(rules.schedule ?? {}), ...overrides.schedule };
+  }
   const autoCommitDefault = rules.autoCommitDefault ?? true;
   const schedule = rules.schedule ?? {};
   const catchUpDefault = schedule.catchUp ?? true;
@@ -2973,9 +3437,12 @@ app.post("/challenges/start", { preHandler: [requireAuth] }, async (req, reply) 
     const weekday = dayOfWeekToNumber(days[0] ?? "WED");
     nextRunAt = computeNextWeeklyRun(startDate, weekday);
   } else if (rules.type === "envelopes") {
+    const min = rules.min ?? 1;
+    const max = rules.max ?? 100;
+    const reverse = rules.order === "reverse";
     const pool = Array.from(
-      { length: (rules.max ?? 100) - (rules.min ?? 1) + 1 },
-      (_, i) => (rules.min ?? 1) + i,
+      { length: max - min + 1 },
+      (_, i) => (reverse ? max - i : min + i),
     );
     state = {
       remaining: pool,
@@ -3107,6 +3574,13 @@ app.post("/challenges/run-due", async () => {
   return { ok: true, processed };
 });
 
+function startOfWeekUtc(d: Date): Date {
+  const dayOnly = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0, 0));
+  const dayNum = dayOnly.getUTCDay();
+  const mondayOffset = dayNum === 0 ? -6 : 1 - dayNum;
+  return addDaysUtc(dayOnly, mondayOffset);
+}
+
 async function runDueForUserImpl(userId: string): Promise<any | null> {
   const now = new Date();
   const user = await prisma.user.findUnique({
@@ -3123,34 +3597,53 @@ async function runDueForUserImpl(userId: string): Promise<any | null> {
     typeof dailyCapOverride === "number"
       ? dailyCapOverride
       : user.tier === "POWER" || user.tier === "DEV"
-        ? 20_000
+        ? 40_000
         : 5_000;
   const perRunCapCents = typeof perRunCapOverride === "number" ? perRunCapOverride : 20_000;
+  const weeklyCapCents = user.tier === "POWER" || user.tier === "DEV" ? 100_000 : null;
 
   const dayStart = new Date(
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0),
   );
   const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+  const weekStart = startOfWeekUtc(now);
+  const weekEnd = addDaysUtc(weekStart, 7);
 
-  const todayUsedAgg = await prisma.paymentIntent.aggregate({
-    where: {
-      userId,
-      type: "DEPOSIT",
-      status: "SETTLED",
-      createdAt: { gte: dayStart, lt: dayEnd },
-      metadata: { path: ["source"], equals: "challenge" },
-    },
-    _sum: { amountCents: true },
-  });
+  const [todayUsedAgg, weekUsedAgg] = await Promise.all([
+    prisma.paymentIntent.aggregate({
+      where: {
+        userId,
+        type: "DEPOSIT",
+        status: "SETTLED",
+        createdAt: { gte: dayStart, lt: dayEnd },
+        metadata: { path: ["source"], equals: "challenge" },
+      },
+      _sum: { amountCents: true },
+    }),
+    weeklyCapCents != null
+      ? prisma.paymentIntent.aggregate({
+          where: {
+            userId,
+            type: "DEPOSIT",
+            status: "SETTLED",
+            createdAt: { gte: weekStart, lt: weekEnd },
+            metadata: { path: ["source"], equals: "challenge" },
+          },
+          _sum: { amountCents: true },
+        })
+      : Promise.resolve({ _sum: { amountCents: 0 as number | null } }),
+  ]);
   const todayUsedStartCents = todayUsedAgg._sum.amountCents ?? 0;
+  const weekUsedStartCents = weekUsedAgg._sum.amountCents ?? 0;
   let usedCents = todayUsedStartCents;
   let runCommittedCents = 0;
+  let weekCommittedCents = weekUsedStartCents;
 
   const skippedCap: Array<{
     eventId: string;
     userChallengeId: string;
     amountCents: number;
-    reason: "daily_cap" | "per_run_cap";
+    reason: "daily_cap" | "per_run_cap" | "weekly_cap";
   }> = [];
 
   const ucs = await prisma.userChallenge.findMany({
@@ -3214,9 +3707,18 @@ async function runDueForUserImpl(userId: string): Promise<any | null> {
     let skippedCapCount = 0;
     let lastScheduled: Date | null = null;
 
+    const isPowerOrDev = user.tier === "POWER" || user.tier === "DEV";
+    const existingMakeup = isPowerOrDev
+      ? await prisma.challengeEvent.findFirst({
+          where: { userChallengeId: uc.id, metadata: { path: ["makeup"], equals: true } },
+        })
+      : null;
+    let makeupCreatedForThisUc = !!existingMakeup;
+
     const processEvent = async (scheduledAt: Date) => {
       const dayKey = yyyymmddUtc(scheduledAt);
       const eventIdempo = `sched_${uc.id}_${dayKey}`;
+      const isPastDay = scheduledAt < dayStart;
 
       const existing = await prisma.challengeEvent.findUnique({
         where: { idempotencyKey: eventIdempo },
@@ -3229,12 +3731,20 @@ async function runDueForUserImpl(userId: string): Promise<any | null> {
         evId = existing.id;
         amountCents = existing.amountCents;
       } else {
+        if (isPastDay && isPowerOrDev && makeupCreatedForThisUc) return;
+
         const weekIndex =
           Math.floor((scheduledAt.getTime() - firstRun.getTime()) / (7 * 24 * 3600 * 1000)) + 1;
 
+        const dayLabel = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"][
+          scheduledAt.getUTCDay()
+        ];
+
+        let metadata: any;
         if (rules.type === "weekly_increment") {
           amountCents =
             (rules.week1AmountCents ?? 100) + (weekIndex - 1) * (rules.incrementCents ?? 100);
+          metadata = { weeksSinceStart: weekIndex };
         } else if (rules.type === "weather_wednesday") {
           const amtRules = rules.amount ?? {};
           amountCents = autoCommit
@@ -3242,13 +3752,45 @@ async function runDueForUserImpl(userId: string): Promise<any | null> {
               ? Number(amtRules.defaultAmountCents)
               : 700
             : null;
+          metadata = { weekday: dayLabel, inputStatus: "NEEDS_INPUT" };
+        } else if (rules.type === "dice") {
+          if (isPastDay && isPowerOrDev && !makeupCreatedForThisUc) {
+            const amountRules = rules.amount ?? {};
+            const sides = Number(amountRules.sides ?? rules.sides ?? 6);
+            const unitAmountCents = Number(amountRules.unitAmountCents ?? rules.unitAmountCents ?? 100);
+            const roll = deterministicRoll({
+              userId: uc.userId,
+              eventId: eventIdempo,
+              sides: [6, 12, 20, 100].includes(sides) ? sides : 6,
+            });
+            const rawCents = roll * unitAmountCents;
+            const maxDice = 2000;
+            amountCents = Math.min(rawCents, maxDice);
+            metadata = { weekday: dayLabel, rollStatus: "NEEDS_ROLL", makeup: true, roll, sides };
+            makeupCreatedForThisUc = true;
+          } else {
+            amountCents = null;
+            metadata = { weekday: dayLabel, rollStatus: "NEEDS_ROLL" };
+          }
+        } else if (rules.type === "temperature") {
+          amountCents = autoCommit
+            ? Number((rules.amount ?? {}).defaultAmountCents ?? 700) || 700
+            : null;
+          metadata = { weekday: dayLabel, inputStatus: "NEEDS_INPUT" };
         } else {
           amountCents = null;
+          metadata = { weekday: dayLabel, inputStatus: "NEEDS_INPUT" };
         }
 
-        const dayLabel = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"][
-          scheduledAt.getUTCDay()
-        ];
+        if (isPastDay && isPowerOrDev && rules.type === "weekly_increment" && !makeupCreatedForThisUc) {
+          metadata = { ...metadata, makeup: true };
+          makeupCreatedForThisUc = true;
+        }
+        if (isPastDay && isPowerOrDev && (rules.type === "weather_wednesday" || rules.type === "temperature") && !makeupCreatedForThisUc) {
+          if (amountCents == null) amountCents = Number((rules.amount ?? {}).defaultAmountCents ?? 700) || 700;
+          metadata = { ...metadata, makeup: true };
+          makeupCreatedForThisUc = true;
+        }
 
         const created = await prisma.challengeEvent.create({
           data: {
@@ -3257,12 +3799,7 @@ async function runDueForUserImpl(userId: string): Promise<any | null> {
             idempotencyKey: eventIdempo,
             amountCents,
             result: "DEPOSIT_SCHEDULED",
-            metadata:
-              rules.type === "weekly_increment"
-                ? ({ weeksSinceStart: weekIndex } as any)
-                : rules.type === "dice"
-                  ? ({ weekday: dayLabel, rollStatus: "NEEDS_ROLL" } as any)
-                  : ({ weekday: dayLabel, inputStatus: "NEEDS_INPUT" } as any),
+            metadata,
           } as any,
         });
         createdEvents += 1;
@@ -3297,6 +3834,14 @@ async function runDueForUserImpl(userId: string): Promise<any | null> {
               reason: "per_run_cap",
             });
             skippedCapCount += 1;
+          } else if (weeklyCapCents != null && weekCommittedCents + amountCents > weeklyCapCents) {
+            skippedCap.push({
+              eventId: evId,
+              userChallengeId: uc.id,
+              amountCents,
+              reason: "weekly_cap",
+            });
+            skippedCapCount += 1;
           } else {
             const res = await commitChallengeEvent({
               userId: uc.userId,
@@ -3308,6 +3853,7 @@ async function runDueForUserImpl(userId: string): Promise<any | null> {
               committedEvents += 1;
               usedCents = nextUsed;
               runCommittedCents = nextRun;
+              weekCommittedCents += amountCents;
             } else {
               alreadyCommitted += 1;
             }
@@ -3424,28 +3970,47 @@ app.post("/users/:userId/challenges/commit-pending", { preHandler: [requireAuth,
     typeof dailyCapOverride === "number"
       ? dailyCapOverride
       : user.tier === "POWER" || user.tier === "DEV"
-        ? 20_000
+        ? 40_000
         : 5_000;
   const perRunCapCents = typeof perRunCapOverride === "number" ? perRunCapOverride : 20_000;
+  const weeklyCapCents = user.tier === "POWER" || user.tier === "DEV" ? 100_000 : null;
 
   const dayStart = new Date(
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0),
   );
   const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+  const weekStart = startOfWeekUtc(now);
+  const weekEnd = addDaysUtc(weekStart, 7);
 
-  const todayUsedAgg = await prisma.paymentIntent.aggregate({
-    where: {
-      userId,
-      type: "DEPOSIT",
-      status: "SETTLED",
-      createdAt: { gte: dayStart, lt: dayEnd },
-      metadata: { path: ["source"], equals: "challenge" },
-    },
-    _sum: { amountCents: true },
-  });
+  const [todayUsedAgg, weekUsedAgg] = await Promise.all([
+    prisma.paymentIntent.aggregate({
+      where: {
+        userId,
+        type: "DEPOSIT",
+        status: "SETTLED",
+        createdAt: { gte: dayStart, lt: dayEnd },
+        metadata: { path: ["source"], equals: "challenge" },
+      },
+      _sum: { amountCents: true },
+    }),
+    weeklyCapCents != null
+      ? prisma.paymentIntent.aggregate({
+          where: {
+            userId,
+            type: "DEPOSIT",
+            status: "SETTLED",
+            createdAt: { gte: weekStart, lt: weekEnd },
+            metadata: { path: ["source"], equals: "challenge" },
+          },
+          _sum: { amountCents: true },
+        })
+      : Promise.resolve({ _sum: { amountCents: 0 as number | null } }),
+  ]);
   const todayUsedStartCents = todayUsedAgg._sum.amountCents ?? 0;
+  const weekUsedStartCents = weekUsedAgg._sum.amountCents ?? 0;
   let usedCents = todayUsedStartCents;
   let runCommittedCents = 0;
+  let weekCommittedCents = weekUsedStartCents;
 
   const pending = await prisma.challengeEvent.findMany({
     where: {
@@ -3460,7 +4025,7 @@ app.post("/users/:userId/challenges/commit-pending", { preHandler: [requireAuth,
     eventId: string;
     userChallengeId: string;
     amountCents: number;
-    reason: "daily_cap" | "per_run_cap";
+    reason: "daily_cap" | "per_run_cap" | "weekly_cap";
   }> = [];
 
   let committedCount = 0;
@@ -3474,6 +4039,7 @@ app.post("/users/:userId/challenges/commit-pending", { preHandler: [requireAuth,
 
     const nextUsed = usedCents + amountCents;
     const nextRun = runCommittedCents + amountCents;
+    const nextWeek = weekCommittedCents + amountCents;
 
     if (nextUsed > dailyCapCents) {
       skippedCap.push({
@@ -3495,7 +4061,18 @@ app.post("/users/:userId/challenges/commit-pending", { preHandler: [requireAuth,
       });
       skippedCapCents += amountCents;
       perRunCapHit = true;
-      break; // stop early; can't commit more this run
+      break;
+    }
+
+    if (weeklyCapCents != null && nextWeek > weeklyCapCents) {
+      skippedCap.push({
+        eventId: ev.id,
+        userChallengeId: ev.userChallengeId,
+        amountCents,
+        reason: "weekly_cap",
+      });
+      skippedCapCents += amountCents;
+      continue;
     }
 
     const res = await commitChallengeEvent({
@@ -3510,6 +4087,7 @@ app.post("/users/:userId/challenges/commit-pending", { preHandler: [requireAuth,
       committedCents += amountCents;
       usedCents = nextUsed;
       runCommittedCents = nextRun;
+      weekCommittedCents += amountCents;
     }
   }
 
@@ -3567,28 +4145,52 @@ app.post("/challenges/:id/draw", { preHandler: [requireAuth] }, async (req, repl
     return { done: true };
   }
 
-  // One draw per UTC day (ritual guardrail)
   const now = new Date();
-  const startOfDayUTC = utcDateOnly(now);
-  const startOfNextDayUTC = addDaysUtc(startOfDayUTC, 1);
-  const drawsToday = await prisma.challengeEvent.count({
-    where: {
-      userChallengeId: uc.id,
-      createdAt: { gte: startOfDayUTC, lt: startOfNextDayUTC },
-    },
-  });
+  const cadence = rules.cadence ?? "daily";
   const maxDrawsPerDay = Number(rules.maxDrawsPerDay ?? settings.maxDrawsPerDay ?? 1);
-  if (drawsToday >= maxDrawsPerDay) {
-    const nextAllowedAt = startOfNextDayUTC;
-    const retryAfterSeconds = Math.max(
-      0,
-      Math.floor((nextAllowedAt.getTime() - now.getTime()) / 1000),
-    );
-    return reply.code(429).send({
-      error: "daily_limit",
-      retryAfterSeconds,
-      nextAllowedAt: nextAllowedAt.toISOString(),
+
+  if (cadence === "weekly") {
+    const weekStart = startOfWeekUtc(now);
+    const weekEnd = addDaysUtc(weekStart, 7);
+    const drawsThisWeek = await prisma.challengeEvent.count({
+      where: {
+        userChallengeId: uc.id,
+        createdAt: { gte: weekStart, lt: weekEnd },
+      },
     });
+    if (drawsThisWeek >= 1) {
+      const nextAllowedAt = weekEnd;
+      const retryAfterSeconds = Math.max(
+        0,
+        Math.floor((nextAllowedAt.getTime() - now.getTime()) / 1000),
+      );
+      return reply.code(429).send({
+        error: "weekly_limit",
+        retryAfterSeconds,
+        nextAllowedAt: nextAllowedAt.toISOString(),
+      });
+    }
+  } else {
+    const startOfDayUTC = utcDateOnly(now);
+    const startOfNextDayUTC = addDaysUtc(startOfDayUTC, 1);
+    const drawsToday = await prisma.challengeEvent.count({
+      where: {
+        userChallengeId: uc.id,
+        createdAt: { gte: startOfDayUTC, lt: startOfNextDayUTC },
+      },
+    });
+    if (drawsToday >= maxDrawsPerDay) {
+      const nextAllowedAt = startOfNextDayUTC;
+      const retryAfterSeconds = Math.max(
+        0,
+        Math.floor((nextAllowedAt.getTime() - now.getTime()) / 1000),
+      );
+      return reply.code(429).send({
+        error: "daily_limit",
+        retryAfterSeconds,
+        nextAllowedAt: nextAllowedAt.toISOString(),
+      });
+    }
   }
 
   // Draw random
@@ -4028,6 +4630,8 @@ app.post("/challenges/:challengeId/events/:eventId/roll", { preHandler: [require
     const amountRules = rules.amount ?? {};
     const sides = Number(amountRules.sides ?? rules.sides ?? 6);
     const unitAmountCents = Number(amountRules.unitAmountCents ?? rules.unitAmountCents ?? 100);
+    const multiDice = Number(amountRules.multiDice ?? 1);
+    const multiplier = Number(amountRules.multiplier ?? 1);
     if (!Number.isFinite(sides) || sides <= 1) {
       return reply.code(400).send({ error: "Invalid sides" });
     }
@@ -4039,13 +4643,30 @@ app.post("/challenges/:challengeId/events/:eventId/roll", { preHandler: [require
       where: { id: uc!.userId },
       select: { tier: true, flags: true },
     });
+    const tier = (user?.tier as string) ?? "NORMIE";
+    const isPowerOrDev = tier === "POWER" || tier === "DEV";
+
+    const allowedSides = isPowerOrDev ? [6, 12, 20, 100] : [6];
+    if (!allowedSides.includes(sides)) {
+      return reply.code(400).send({ error: "This dice type is only available on POWER tier" });
+    }
+    if (multiDice > 1 && multiplier > 1) {
+      return reply.code(400).send({ error: "Cannot use multi-dice and multiplier together" });
+    }
+    if (multiDice > 1 && !isPowerOrDev) {
+      return reply.code(400).send({ error: "Multi-dice is only available on POWER tier" });
+    }
+    if (multiplier > 1 && !isPowerOrDev) {
+      return reply.code(400).send({ error: "Dice multiplier is only available on POWER tier" });
+    }
+
     const rawFlags = (user?.flags as any) ?? {};
     const tierMax =
       typeof rawFlags.maxSingleDiceSaveCents === "number"
         ? rawFlags.maxSingleDiceSaveCents
-        : user?.tier === "DEV"
+        : tier === "DEV"
           ? 50_000
-          : user?.tier === "POWER"
+          : tier === "POWER"
             ? 20_000
             : 5_000;
 
@@ -4054,24 +4675,30 @@ app.post("/challenges/:challengeId/events/:eventId/roll", { preHandler: [require
       tierMax,
     );
 
-    const roll = deterministicRoll({ userId: uc!.userId, eventId: ce.id, sides });
-    const rawCents = roll * unitAmountCents;
+    const { roll, rollBreakdown } = resolveDiceRoll({
+      userId: uc!.userId,
+      eventId: ce.id,
+      sides,
+      multiDice: multiDice >= 2 ? 2 : 1,
+    });
+    let rawCents = roll * unitAmountCents * (multiplier >= 10 ? 10 : 1);
     const amountCents = clampNumber(rawCents, 0, maxDiceSaveCents);
     if (amountCents <= 0) {
       return reply.code(400).send({ error: "Dice amount must be positive" });
     }
 
+    const meta: Record<string, unknown> = {
+      ...(ce.metadata as any),
+      roll,
+      sides,
+      unitAmountCents,
+    };
+    if (rollBreakdown) meta.rollBreakdown = rollBreakdown;
+    if (multiplier >= 10) meta.multiplier = 10;
+
     await prisma.challengeEvent.update({
       where: { id: ce.id },
-      data: {
-        amountCents,
-        metadata: {
-          ...(ce.metadata as any),
-          roll,
-          sides,
-          unitAmountCents,
-        },
-      },
+      data: { amountCents, metadata: meta },
     });
 
     const res = await commitChallengeEvent({
@@ -4080,12 +4707,15 @@ app.post("/challenges/:challengeId/events/:eventId/roll", { preHandler: [require
       challengeEventId: ce.id,
     });
 
-    return reply.send({
+    const payload: Record<string, unknown> = {
       status: res.status,
       paymentIntentId: res.paymentIntentId,
       roll,
       amountCents,
-    });
+    };
+    if (rollBreakdown) payload.rollBreakdown = rollBreakdown;
+    if (multiplier >= 10) payload.multiplier = 10;
+    return reply.send(payload);
   } catch (err: any) {
     app.log.error(err);
     return reply.code(500).send({ error: err.message });
@@ -4167,6 +4797,84 @@ async function runPushReminderJob(): Promise<void> {
     }
   }
 }
+
+// --- Weekly recap (POWER): run on Sunday UTC, e.g. cron POST /cron/weekly-recap ---
+async function runWeeklyRecapJob(): Promise<{ sent: number; errors: number }> {
+  const now = new Date();
+  const weekStart = startOfWeekUtc(now);
+  const weekEnd = addDaysUtc(weekStart, 7);
+
+  const users = await prisma.user.findMany({
+    where: {
+      email: { not: null },
+      tier: { in: ["POWER", "DEV"] },
+    },
+    select: { id: true, email: true },
+  });
+
+  let sent = 0;
+  let errors = 0;
+  for (const u of users) {
+    const email = (u as any).email;
+    if (!email || typeof email !== "string") continue;
+    try {
+      const [savedAgg, completedAgg, missedAgg, streak] = await Promise.all([
+        prisma.paymentIntent.aggregate({
+          where: {
+            userId: u.id,
+            type: "DEPOSIT",
+            status: "SETTLED",
+            createdAt: { gte: weekStart, lt: weekEnd },
+            metadata: { path: ["source"], equals: "challenge" },
+          },
+          _sum: { amountCents: true },
+        }),
+        prisma.challengeEvent.count({
+          where: {
+            userChallenge: { userId: u.id },
+            scheduledFor: { gte: weekStart, lt: weekEnd },
+            paymentIntentId: { not: null },
+          },
+        }),
+        prisma.challengeEvent.count({
+          where: {
+            userChallenge: { userId: u.id },
+            scheduledFor: { gte: weekStart, lt: weekEnd },
+            paymentIntentId: null,
+          },
+        }),
+        getStreakForUser(u.id),
+      ]);
+      const totalSavedCents = savedAgg._sum.amountCents ?? 0;
+      const payload: WeeklyRecapPayload = {
+        totalSavedCents,
+        challengesCompleted: completedAgg,
+        challengesMissed: missedAgg,
+        currentStreakDays: streak?.currentStreakDays ?? 0,
+        bestStreakDays: streak?.bestStreakDays ?? 0,
+      };
+      const result = await sendWeeklyRecapEmail(email, payload);
+      if (result.ok) sent += 1;
+      else {
+        errors += 1;
+        app.log.warn({ userId: u.id, error: (result as any).error }, "weekly recap send failed");
+      }
+    } catch (e: any) {
+      errors += 1;
+      app.log.error({ userId: u.id, err: e }, "weekly recap error");
+    }
+  }
+  return { sent, errors };
+}
+
+app.post("/cron/weekly-recap", async (req, reply) => {
+  const secret = process.env.CRON_SECRET?.trim();
+  if (secret && (req.headers as any)["x-cron-secret"] !== secret) {
+    return reply.code(403).send({ error: "forbidden" });
+  }
+  const result = await runWeeklyRecapJob();
+  return reply.send({ ok: true, ...result });
+});
 
 const port = Number(process.env.PORT ?? 4001);
 app.listen({ port, host: "0.0.0.0" }).then(() => {

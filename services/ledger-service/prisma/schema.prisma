@@ -89,6 +89,9 @@ model User {
   currentStreakDays  Int     @default(0)
   bestStreakDays     Int     @default(0)
   lastStreakDateUtc  String? // YYYY-MM-DD
+  // POWER: streak shield (1 active at a time; when used, needs 2 saves in next window to preserve streak)
+  streakShieldAvailable Boolean @default(false)
+  streakShieldUsedAtUtc String?  // YYYY-MM-DD when shield entered "pending recovery"
 }
 
 model AuthToken {
@@ -337,6 +340,18 @@ model UserWallet {
   user      User     @relation(fields: [userId], references: [id])
 
   address   String
+  /// SMART (embedded) | EXTERNAL (e.g. Mini App connected)
+  walletType String  @default("SMART")
+  /// base | baseSepolia
+  chain     String   @default("base")
+  /// Provider-specific ref (e.g. smart wallet id) for production swap
+  providerRef String?
+  /// USDC micros we have already turned into deposit intents (for funding/refresh delta)
+  accountedPrincipalUsdcMicros String @default("0")
+  /// When we last ran funding/refresh (for UI "last checked")
+  lastFundingRefreshAt DateTime?
+  /// Chain balance we last observed at lastFundingRefreshAt (for UI + idempotency)
+  lastObservedBalanceMicros String?
 }
 
 model OnchainAction {

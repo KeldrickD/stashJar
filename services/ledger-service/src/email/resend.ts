@@ -62,3 +62,76 @@ export async function sendMagicLinkEmail(email: string, link: string): Promise<S
   }
   return { ok: false, error: "No id in Resend response" };
 }
+
+const RECAP_SUBJECT = "Your weekly Stash Jar recap";
+
+export type WeeklyRecapPayload = {
+  totalSavedCents: number;
+  challengesCompleted: number;
+  challengesMissed: number;
+  currentStreakDays: number;
+  bestStreakDays: number;
+};
+
+function recapHtml(p: WeeklyRecapPayload): string {
+  const total = (p.totalSavedCents / 100).toFixed(2);
+  return `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="font-family: system-ui, sans-serif; line-height: 1.5; color: #1a1a1a; max-width: 480px; margin: 0 auto; padding: 24px;">
+  <h1 style="font-size: 1.25rem; font-weight: 600;">Your week in review</h1>
+  <p>Here’s a quick snapshot of your Stash Jar week.</p>
+  <ul style="list-style: none; padding: 0;">
+    <li style="margin: 12px 0;"><strong>Saved this week:</strong> $${total}</li>
+    <li style="margin: 12px 0;"><strong>Challenges completed:</strong> ${p.challengesCompleted}</li>
+    <li style="margin: 12px 0;"><strong>Challenges missed:</strong> ${p.challengesMissed}</li>
+    <li style="margin: 12px 0;"><strong>Current streak:</strong> ${p.currentStreakDays} day${p.currentStreakDays !== 1 ? "s" : ""}</li>
+    <li style="margin: 12px 0;"><strong>Best streak:</strong> ${p.bestStreakDays} day${p.bestStreakDays !== 1 ? "s" : ""}</li>
+  </ul>
+  <p style="font-size: 0.875rem; color: #666;">Keep it up — every save counts.</p>
+</body>
+</html>`;
+}
+
+function recapText(p: WeeklyRecapPayload): string {
+  const total = (p.totalSavedCents / 100).toFixed(2);
+  return [
+    "Your week in review",
+    "",
+    `Saved this week: $${total}`,
+    `Challenges completed: ${p.challengesCompleted}`,
+    `Challenges missed: ${p.challengesMissed}`,
+    `Current streak: ${p.currentStreakDays} day(s)`,
+    `Best streak: ${p.bestStreakDays} day(s)`,
+    "",
+    "Keep it up — every save counts.",
+  ].join("\n");
+}
+
+export async function sendWeeklyRecapEmail(
+  email: string,
+  payload: WeeklyRecapPayload,
+): Promise<SendResult> {
+  const apiKey = process.env.RESEND_API_KEY?.trim();
+  const from = process.env.EMAIL_FROM?.trim();
+  if (!apiKey || !from) {
+    return { ok: false, error: "RESEND_API_KEY or EMAIL_FROM not set" };
+  }
+  const resend = new Resend(apiKey);
+  const opts: { from: string; to: string[]; subject: string; html: string; text: string; replyTo?: string } = {
+    from,
+    to: [email],
+    subject: RECAP_SUBJECT,
+    html: recapHtml(payload),
+    text: recapText(payload),
+  };
+  const replyTo = process.env.EMAIL_REPLY_TO?.trim();
+  if (replyTo) opts.replyTo = replyTo;
+  const { data, error } = await resend.emails.send(opts);
+  if (error) {
+    return { ok: false, error: typeof error === "object" ? JSON.stringify(error) : String(error) };
+  }
+  if (data?.id) return { ok: true };
+  return { ok: false, error: "No id in Resend response" };
+}

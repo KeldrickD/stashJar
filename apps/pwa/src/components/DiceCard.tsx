@@ -11,6 +11,8 @@ type Card = {
   prompt: string;
   sides: number;
   unitAmountCents: number;
+  multiDice?: number;
+  multiplier?: number;
 };
 
 type Props = {
@@ -34,7 +36,12 @@ export function DiceCard({ card, onDone }: Props) {
         setMsg("Already saved for today ✅");
       } else {
         const dollars = (res.amountCents ?? 0) / 100;
-        setMsg(`You rolled ${res.roll} — saving $${dollars.toFixed(0)} ✅`);
+        const rollLabel = Array.isArray(res.rollBreakdown)
+          ? `${res.rollBreakdown.join(" + ")} = ${res.roll}`
+          : res.multiplier
+            ? `${res.roll} × ${res.multiplier}`
+            : String(res.roll);
+        setMsg(`You rolled ${rollLabel} — saving $${dollars.toFixed(0)} ✅`);
       }
       onDone();
     } catch (e: any) {
@@ -47,7 +54,14 @@ export function DiceCard({ card, onDone }: Props) {
   return (
     <section className="rounded-xl border p-5 space-y-3">
       <div className="text-lg font-semibold">{card.title}</div>
-      <div className="text-sm opacity-70">{card.prompt}</div>
+      <div className="text-sm opacity-70">
+        {card.prompt}
+        {(card.multiDice === 2 || card.multiplier === 10 || (card.sides !== 6 && card.sides > 0)) && (
+          <span className="ml-1 text-xs opacity-60">
+            {card.multiplier === 10 ? " ×10" : card.multiDice === 2 ? " 2×D" + card.sides : " D" + card.sides}
+          </span>
+        )}
+      </div>
 
       <div className="flex flex-wrap gap-2">
         <button
