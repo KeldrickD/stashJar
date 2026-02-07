@@ -10,6 +10,12 @@ import { getChallengeDueWindow } from "./lib/challengeDue";
 import { isFundingConfigured, getUsdcBalanceMicros } from "./lib/chainRead";
 import { isCdpConfigured } from "./lib/cdpSessionToken";
 import { createFundingSession } from "./lib/fundingProvider";
+import {
+  getFundingLimitsForUi,
+  getFundingRefreshLimits,
+  getFundingSessionLimits,
+  getWithdrawDailyLimitCents,
+} from "./lib/fundingLimits";
 import { deterministicWalletProvider } from "./lib/walletProvider";
 import { isAddress } from "viem";
 import {
@@ -145,7 +151,6 @@ const RATE_WINDOW_MS = 60_000;
 const RATE_LIMIT_IP = 60;
 const RATE_LIMIT_USER_ACTIONS = 30;
 const RATE_LIMIT_FUNDING_REFRESH = 10;
-const RATE_LIMIT_FUNDING_SESSION = 3;
 const rateLimitIP = new Map<string, { count: number; resetAt: number }>();
 const rateLimitUser = new Map<string, { count: number; resetAt: number }>();
 const rateLimitFundingRefresh = new Map<string, { count: number; resetAt: number }>();
@@ -1105,11 +1110,10 @@ app.post("/auth/logout", async (req, reply) => {
   return reply.send({ ok: true });
 });
 
-const MIN_DEPOSIT_CENTS = 100;
-const MAX_DEPOSIT_CENTS = 500_000; // $5k
-
 function buildWalletAndFunding(
   user: {
+    tier?: string;
+    flags?: Record<string, unknown> | null;
     wallet?: {
       address: string;
       walletType: string;
@@ -1124,6 +1128,7 @@ function buildWalletAndFunding(
   const ready = !!uw?.address;
   const fundingConfigured = isFundingConfigured();
   const showAddress = flags.showVaultShares || flags.showCryptoLabels;
+  const limitsForUi = getFundingLimitsForUi(user.tier ?? "NORMIE", user.flags);
 
   const wallet = {
     ready,
@@ -1138,10 +1143,23 @@ function buildWalletAndFunding(
         enabled: true,
         provider: "coinbase" as const,
         rail: "USDC",
-        limits: { minDepositCents: MIN_DEPOSIT_CENTS, maxDepositCents: MAX_DEPOSIT_CENTS },
+        limits: {
+          minDepositCents: limitsForUi.minDepositCents,
+          maxDepositCents: limitsForUi.maxDepositCents,
+          maxCreditPerCallCents: limitsForUi.maxCreditPerCallCents,
+          maxCreditsPerDayCents: limitsForUi.maxCreditsPerDayCents,
+        },
         lastRefreshAt: uw?.lastFundingRefreshAt?.toISOString() ?? null,
         lastObservedBalanceMicros: uw?.lastObservedBalanceMicros ?? null,
-        ui: { primaryCtaLabel: "Add money", secondaryCtaLabel: "Withdraw" },
+        ui: {
+          primaryCtaLabel: "Add money",
+          secondaryCtaLabel: "Withdraw",
+          mode: "fundcard",
+          title: "Add money",
+          asset: "USDC",
+          helperText:
+            "Use a debit card or bank transfer. After you finish, come back here to see your balance.",
+        },
       }
     : {
         enabled: false,
@@ -1538,11 +1556,14 @@ app.post("/users/:userId/withdraw/wallet", { preHandler: [requireAuth, requireUs
     return reply.code(429).send({ error: "daily_limit_count", limit: 3 });
   }
 
+  const dailyLimitCents = getWithdrawDailyLimitCents(user.tier as any);
   const used = recent.reduce((s, r) => s + r.amountCents, 0);
-  if (used + amountCents > 50_000) {
-    return reply
-      .code(429)
-      .send({ error: "daily_limit_amount", limitCents: 50_000, usedCents: used });
+  if (dailyLimitCents <= 0 || used + amountCents > dailyLimitCents) {
+    return reply.code(429).send({
+      error: "daily_limit_amount",
+      limitCents: dailyLimitCents,
+      usedCents: used,
+    });
   }
 
   const existing = await prisma.paymentIntent.findUnique({ where: { idempotencyKey } });
@@ -2197,7 +2218,13 @@ app.get("/users/:userId/config", { preHandler: [requireAuth, requireUserIdMatch]
   if (!user) return reply.code(404).send({ error: "User not found" });
 
   const flags = resolveFlags(user.tier as any, user.flags);
-  const payload = { userId: user.id, tier: user.tier, flags };
+  const withdrawDailyLimitCents = getWithdrawDailyLimitCents(user.tier as any);
+  const payload = {
+    userId: user.id,
+    tier: user.tier,
+    flags,
+    ...(withdrawDailyLimitCents > 0 && { withdrawDailyLimitCents }),
+  };
   const etag = weakEtag("cfg", stableStringify(payload));
   const cacheControl = "private, max-age=300";
   if (ifNoneMatch(req) === etag) {
@@ -3158,7 +3185,15 @@ app.post("/funding/session", { preHandler: [requireAuth] }, async (req, reply) =
     return reply.code(501).send({ error: "funding_session_not_configured" });
   }
 
-  if (!checkRateLimit(`funding_session:${userId}`, rateLimitFundingSession, RATE_LIMIT_FUNDING_SESSION)) {
+  const sessionUser = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { tier: true, flags: true },
+  });
+  const sessionLimits = getFundingSessionLimits(
+    sessionUser?.tier ?? "NORMIE",
+    (sessionUser?.flags as Record<string, unknown>) ?? null,
+  );
+  if (!checkRateLimit(`funding_session:${userId}`, rateLimitFundingSession, sessionLimits.sessionsPerMinute)) {
     return reply.code(429).header("Retry-After", "60").send({ error: "rate_limit", retryAfterSeconds: 60 });
   }
 
@@ -3214,6 +3249,15 @@ app.post("/users/:userId/funding/refresh", { preHandler: [requireAuth, requireUs
     return reply.code(409).send({ error: "wallet_not_ready" });
   }
 
+  const refreshUser = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { tier: true, flags: true },
+  });
+  const refreshLimits = getFundingRefreshLimits(
+    refreshUser?.tier ?? "NORMIE",
+    (refreshUser?.flags as Record<string, unknown>) ?? null,
+  );
+
   const balanceMicros = await getUsdcBalanceMicros(uw.address);
   if (balanceMicros === null) {
     return reply.code(503).send({ error: "chain_unavailable" });
@@ -3221,9 +3265,44 @@ app.post("/users/:userId/funding/refresh", { preHandler: [requireAuth, requireUs
 
   const accountedBefore = BigInt(uw.accountedPrincipalUsdcMicros ?? "0");
   const deltaMicros = balanceMicros > accountedBefore ? balanceMicros - accountedBefore : 0n;
-  const deltaCents = Math.floor(Number(deltaMicros / 10_000n));
-  const minCents = MIN_DEPOSIT_CENTS;
-  const maxCents = Math.min(MAX_DEPOSIT_CENTS, deltaCents);
+  let deltaCents = Math.floor(Number(deltaMicros / 10_000n));
+  const minCents = refreshLimits.minCreditDeltaCents;
+  const maxCreditPerCall = refreshLimits.maxCreditPerCallCents;
+  const maxCreditsPerDay = refreshLimits.maxCreditsPerDayCents;
+
+  const now = new Date();
+  const startOfDayUTC = utcDateOnly(now);
+  const startOfNextDayUTC = addDaysUtc(startOfDayUTC, 1);
+  const fundingSourceFilter = {
+    OR: [
+      { metadata: { path: ["source"], equals: "funding_refresh" } },
+      { metadata: { path: ["source"], equals: "funding" } },
+    ],
+  };
+  const creditsTodayAgg = await prisma.paymentIntent.aggregate({
+    where: {
+      userId,
+      type: "DEPOSIT",
+      status: "SETTLED",
+      createdAt: { gte: startOfDayUTC, lt: startOfNextDayUTC },
+      ...fundingSourceFilter,
+    },
+    _sum: { amountCents: true },
+  });
+  const creditsToday = creditsTodayAgg._sum.amountCents ?? 0;
+  const creditHeadroom = Math.max(0, maxCreditsPerDay - creditsToday);
+  if (creditHeadroom <= 0) {
+    return reply
+      .code(429)
+      .header("Retry-After", "60")
+      .send({
+        error: "daily_limit",
+        retryAfterSeconds: 60,
+        maxCreditsPerDayCents: maxCreditsPerDay,
+      });
+  }
+
+  const maxCents = Math.min(maxCreditPerCall, deltaCents, creditHeadroom);
   const asOf = new Date();
 
   const updateRefreshMeta = () =>
@@ -3258,7 +3337,7 @@ app.post("/users/:userId/funding/refresh", { preHandler: [requireAuth, requireUs
       userId,
       amountCents: maxCents,
       idempotencyKey,
-      metadata: { source: "funding", fundingWalletAddress: uw.address },
+      metadata: { source: "funding_refresh", fundingWalletAddress: uw.address },
     });
   } catch (e: any) {
     if (e?.code === "P2002" || e?.message?.includes("Unique constraint")) {
