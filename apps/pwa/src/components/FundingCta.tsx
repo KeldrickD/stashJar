@@ -97,7 +97,7 @@ export function FundingCta({
   const handleAddMoneyClick = async () => {
     setSessionLoading(true);
     try {
-      const session = await api.getFundingSession();
+      const session = await api.getFundingSession({ context: "pwa" });
       if (session?.sessionToken) {
         setFundingSessionToken(session.sessionToken);
         setShowFundingModal(true);

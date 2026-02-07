@@ -10,6 +10,8 @@ export type CreateSessionTokenParams = {
   walletAddress: string;
   clientIp: string;
   apiKey: string;
+  /** Session TTL in minutes (default 5). */
+  ttlMinutes?: number;
 };
 
 export type CreateSessionTokenResult =
@@ -23,8 +25,9 @@ export type CreateSessionTokenResult =
 export async function createCdpSessionToken(
   params: CreateSessionTokenParams,
 ): Promise<CreateSessionTokenResult> {
-  const { walletAddress, clientIp, apiKey } = params;
-  const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+  const { walletAddress, clientIp, apiKey, ttlMinutes = 5 } = params;
+  const ttlMs = Math.min(15, Math.max(1, ttlMinutes)) * 60 * 1000;
+  const expiresAt = new Date(Date.now() + ttlMs).toISOString();
 
   try {
     const res = await fetch(CDP_TOKEN_URL, {

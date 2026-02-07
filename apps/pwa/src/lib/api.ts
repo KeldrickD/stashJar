@@ -249,13 +249,14 @@ export const api = {
   fundingRefresh: (userId: string, body?: { mode?: string; clientContext?: Record<string, string> }) =>
     req<any>("POST", `/users/${userId}/funding/refresh`, body ?? {}),
 
-  getFundingSession: (body?: { returnUrl?: string }) =>
+  getFundingSession: (body?: { returnTo?: string; context?: "pwa" | "miniapp" }) =>
     req<{
       provider: string;
+      enabled: boolean;
       sessionToken: string;
-      walletAddress: string;
       expiresAt: string;
-      returnUrl?: string;
+      wallet: { chain: string; address: string };
+      ui: { mode: string; title: string; asset: string };
     }>("POST", "/funding/session", body ?? {}),
 
   walletProvision: (userId: string) =>

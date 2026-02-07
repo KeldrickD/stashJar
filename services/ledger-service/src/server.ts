@@ -8,10 +8,8 @@ import { z } from "zod";
 import { resolveFlags } from "./lib/tier";
 import { getChallengeDueWindow } from "./lib/challengeDue";
 import { isFundingConfigured, getUsdcBalanceMicros } from "./lib/chainRead";
-import {
-  createCdpSessionToken,
-  isCdpConfigured,
-} from "./lib/cdpSessionToken";
+import { isCdpConfigured } from "./lib/cdpSessionToken";
+import { createFundingSession } from "./lib/fundingProvider";
 import { deterministicWalletProvider } from "./lib/walletProvider";
 import { isAddress } from "viem";
 import {
@@ -43,9 +41,11 @@ const EnvSchema = z.object({
   VAPID_PRIVATE_KEY: z.string().optional(),
   VAPID_SUBJECT: z.string().optional(),
   PUSH_ENABLED: z.string().optional().transform((s) => s === "true" || s === "1"),
-  // Coinbase Developer Platform: for POST /funding/session (Onramp session token)
+  // Funding session (OnchainKit FundCard): provider + CDP
+  FUNDING_PROVIDER: z.string().optional(),
   CDP_PROJECT_ID: z.string().optional(),
   CDP_API_KEY: z.string().optional(),
+  FUNDING_SESSION_TTL_MIN: z.string().optional().transform((s) => (s ? Number(s) : 10)),
 });
 const env = EnvSchema.safeParse(process.env);
 if (!env.success) {
@@ -145,9 +145,11 @@ const RATE_WINDOW_MS = 60_000;
 const RATE_LIMIT_IP = 60;
 const RATE_LIMIT_USER_ACTIONS = 30;
 const RATE_LIMIT_FUNDING_REFRESH = 10;
+const RATE_LIMIT_FUNDING_SESSION = 3;
 const rateLimitIP = new Map<string, { count: number; resetAt: number }>();
 const rateLimitUser = new Map<string, { count: number; resetAt: number }>();
 const rateLimitFundingRefresh = new Map<string, { count: number; resetAt: number }>();
+const rateLimitFundingSession = new Map<string, { count: number; resetAt: number }>();
 
 function checkRateLimit(key: string, map: Map<string, { count: number; resetAt: number }>, limit: number): boolean {
   const now = Date.now();
@@ -1134,18 +1136,17 @@ function buildWalletAndFunding(
   const funding = fundingConfigured && ready
     ? {
         enabled: true,
-        provider: "coinbase",
+        provider: "coinbase" as const,
         rail: "USDC",
-        minDepositCents: MIN_DEPOSIT_CENTS,
-        maxDepositCents: MAX_DEPOSIT_CENTS,
-        requiresKyc: false,
-        sessionHint: "fund_v1",
+        limits: { minDepositCents: MIN_DEPOSIT_CENTS, maxDepositCents: MAX_DEPOSIT_CENTS },
         lastRefreshAt: uw?.lastFundingRefreshAt?.toISOString() ?? null,
         lastObservedBalanceMicros: uw?.lastObservedBalanceMicros ?? null,
         ui: { primaryCtaLabel: "Add money", secondaryCtaLabel: "Withdraw" },
       }
     : {
         enabled: false,
+        provider: null as string | null,
+        rail: "USDC",
         reason: (!fundingConfigured ? "not_configured" : "wallet_not_ready") as "not_configured" | "wallet_not_ready",
       };
 
@@ -3133,7 +3134,8 @@ app.get("/users/:userId/home", { preHandler: [requireAuth, requireUserIdMatch] }
 
 // --- Funding session token (for FundCard/FundButton; 501 until CDP keys set) ---
 const FundingSessionSchema = z.object({
-  returnUrl: z.string().url().optional(),
+  returnTo: z.string().optional(),
+  context: z.enum(["pwa", "miniapp"]).optional(),
 });
 
 app.post("/funding/session", { preHandler: [requireAuth] }, async (req, reply) => {
@@ -3145,39 +3147,55 @@ app.post("/funding/session", { preHandler: [requireAuth] }, async (req, reply) =
     return reply.code(409).send({ error: "wallet_not_ready" });
   }
 
+  if (!isFundingConfigured()) {
+    return reply.code(503).send({ error: "funding_disabled" });
+  }
+
+  const fundingProvider = (env.data.FUNDING_PROVIDER ?? "").toLowerCase();
   const projectId = env.data.CDP_PROJECT_ID?.trim();
   const apiKey = env.data.CDP_API_KEY?.trim();
-  if (!isCdpConfigured(projectId, apiKey)) {
-    return reply.code(501).send({
-      error: "funding_session_not_configured",
-      message: "CDP_PROJECT_ID and CDP_API_KEY must be set for session token",
-    });
+  if (fundingProvider !== "coinbase" || !isCdpConfigured(projectId, apiKey)) {
+    return reply.code(501).send({ error: "funding_session_not_configured" });
+  }
+
+  if (!checkRateLimit(`funding_session:${userId}`, rateLimitFundingSession, RATE_LIMIT_FUNDING_SESSION)) {
+    return reply.code(429).header("Retry-After", "60").send({ error: "rate_limit", retryAfterSeconds: 60 });
   }
 
   const parsed = FundingSessionSchema.safeParse((req.body as any) ?? {});
-  const returnUrl = parsed.success ? parsed.data.returnUrl : undefined;
-  const clientIp = getClientIP(req);
+  const returnTo = parsed.success ? sanitizeReturnTo(parsed.data.returnTo) ?? undefined : undefined;
+  const context = parsed.success ? parsed.data.context : undefined;
+  if (context) {
+    app.log.info({ userId, context }, "funding/session context");
+  }
 
-  const result = await createCdpSessionToken({
+  const clientIp = getClientIP(req);
+  const ttlMinutes = env.data.FUNDING_SESSION_TTL_MIN ?? 10;
+  const result = await createFundingSession({
+    userId,
     walletAddress: uw.address,
+    chain: uw.chain,
+    returnTo: returnTo ?? null,
+    context,
     clientIp,
     apiKey: apiKey!,
+    ttlMinutes,
   });
 
   if (!result.ok) {
     app.log.warn({ userId, statusCode: result.statusCode, error: result.error }, "CDP session token failed");
-    return reply.code(503).send({
-      error: "session_token_failed",
-      message: result.error ?? "Could not create funding session",
-    });
+    return reply.code(503).send({ error: "session_token_failed" });
   }
 
+  reply.header("Cache-Control", "no-store");
+  reply.header("X-Build", BUILD_TIMESTAMP);
   return reply.send({
     provider: "coinbase",
-    sessionToken: result.token,
-    walletAddress: uw.address,
+    enabled: true,
+    sessionToken: result.sessionToken,
     expiresAt: result.expiresAt,
-    ...(returnUrl && { returnUrl }),
+    wallet: { chain: uw.chain, address: uw.address },
+    ui: { mode: "fundcard", title: "Add money", asset: "USDC" },
   });
 });
 
