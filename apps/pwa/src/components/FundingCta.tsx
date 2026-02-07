@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { api } from "@/lib/api";
+import { FundingModal } from "./FundingModal";
 
 const POLL_INTERVAL_MS = 5_000;
 const POLL_MAX_DURATION_MS = 60_000;
@@ -38,6 +40,9 @@ export function FundingCta({
   setToast,
 }: Props) {
   const [polling, setPolling] = useState(false);
+  const [showFundingModal, setShowFundingModal] = useState(false);
+  const [fundingSessionToken, setFundingSessionToken] = useState<string | null>(null);
+  const [sessionLoading, setSessionLoading] = useState(false);
   const pollUntil = useRef<number>(0);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -89,6 +94,28 @@ export function FundingCta({
     }
   };
 
+  const handleAddMoneyClick = async () => {
+    setSessionLoading(true);
+    try {
+      const session = await api.getFundingSession();
+      if (session?.sessionToken) {
+        setFundingSessionToken(session.sessionToken);
+        setShowFundingModal(true);
+        setSessionLoading(false);
+        return;
+      }
+    } catch {
+      // 501 or 503 or 409: fall back to manual refresh
+    }
+    setSessionLoading(false);
+    await handleAddMoney();
+  };
+
+  const handleCloseFundingModal = () => {
+    setShowFundingModal(false);
+    setFundingSessionToken(null);
+  };
+
   const lastChecked = formatLastChecked(lastRefreshAt);
 
   if (!walletReady) {
@@ -121,14 +148,20 @@ export function FundingCta({
 
   return (
     <section className="rounded-xl border p-5 space-y-3">
+      <FundingModal
+        open={showFundingModal}
+        sessionToken={fundingSessionToken}
+        onClose={handleCloseFundingModal}
+        onAfterFunding={handleAddMoney}
+      />
       <div className="flex flex-wrap gap-2 items-center">
         <button
           type="button"
-          disabled={busy || polling}
-          onClick={handleAddMoney}
+          disabled={busy || polling || sessionLoading}
+          onClick={handleAddMoneyClick}
           className="rounded bg-black text-white px-4 py-2 font-medium"
         >
-          {busy ? "Refreshing…" : polling ? "Checking…" : "Add money"}
+          {sessionLoading ? "Opening…" : busy ? "Refreshing…" : polling ? "Checking…" : "Add money"}
         </button>
         <a href="/history" className="rounded border border-black px-4 py-2 font-medium inline-block">
           Withdraw

@@ -8,6 +8,10 @@ import { z } from "zod";
 import { resolveFlags } from "./lib/tier";
 import { getChallengeDueWindow } from "./lib/challengeDue";
 import { isFundingConfigured, getUsdcBalanceMicros } from "./lib/chainRead";
+import {
+  createCdpSessionToken,
+  isCdpConfigured,
+} from "./lib/cdpSessionToken";
 import { deterministicWalletProvider } from "./lib/walletProvider";
 import { isAddress } from "viem";
 import {
@@ -39,6 +43,9 @@ const EnvSchema = z.object({
   VAPID_PRIVATE_KEY: z.string().optional(),
   VAPID_SUBJECT: z.string().optional(),
   PUSH_ENABLED: z.string().optional().transform((s) => s === "true" || s === "1"),
+  // Coinbase Developer Platform: for POST /funding/session (Onramp session token)
+  CDP_PROJECT_ID: z.string().optional(),
+  CDP_API_KEY: z.string().optional(),
 });
 const env = EnvSchema.safeParse(process.env);
 if (!env.success) {
@@ -3122,6 +3129,56 @@ app.get("/users/:userId/home", { preHandler: [requireAuth, requireUserIdMatch] }
   reply.header("X-Build", BUILD_TIMESTAMP);
   reply.header("Cache-Control", "no-store");
   return reply.send(payload);
+});
+
+// --- Funding session token (for FundCard/FundButton; 501 until CDP keys set) ---
+const FundingSessionSchema = z.object({
+  returnUrl: z.string().url().optional(),
+});
+
+app.post("/funding/session", { preHandler: [requireAuth] }, async (req, reply) => {
+  const userId = (req as any).user?.id;
+  if (!userId) return reply.code(401).send({ error: "unauthorized" });
+
+  const uw = await prisma.userWallet.findUnique({ where: { userId } });
+  if (!uw) {
+    return reply.code(409).send({ error: "wallet_not_ready" });
+  }
+
+  const projectId = env.data.CDP_PROJECT_ID?.trim();
+  const apiKey = env.data.CDP_API_KEY?.trim();
+  if (!isCdpConfigured(projectId, apiKey)) {
+    return reply.code(501).send({
+      error: "funding_session_not_configured",
+      message: "CDP_PROJECT_ID and CDP_API_KEY must be set for session token",
+    });
+  }
+
+  const parsed = FundingSessionSchema.safeParse((req.body as any) ?? {});
+  const returnUrl = parsed.success ? parsed.data.returnUrl : undefined;
+  const clientIp = getClientIP(req);
+
+  const result = await createCdpSessionToken({
+    walletAddress: uw.address,
+    clientIp,
+    apiKey: apiKey!,
+  });
+
+  if (!result.ok) {
+    app.log.warn({ userId, statusCode: result.statusCode, error: result.error }, "CDP session token failed");
+    return reply.code(503).send({
+      error: "session_token_failed",
+      message: result.error ?? "Could not create funding session",
+    });
+  }
+
+  return reply.send({
+    provider: "coinbase",
+    sessionToken: result.token,
+    walletAddress: uw.address,
+    expiresAt: result.expiresAt,
+    ...(returnUrl && { returnUrl }),
+  });
 });
 
 // --- Funding refresh: turn wallet USDC balance into ledger deposit intents (idempotent) ---

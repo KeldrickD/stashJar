@@ -249,6 +249,15 @@ export const api = {
   fundingRefresh: (userId: string, body?: { mode?: string; clientContext?: Record<string, string> }) =>
     req<any>("POST", `/users/${userId}/funding/refresh`, body ?? {}),
 
+  getFundingSession: (body?: { returnUrl?: string }) =>
+    req<{
+      provider: string;
+      sessionToken: string;
+      walletAddress: string;
+      expiresAt: string;
+      returnUrl?: string;
+    }>("POST", "/funding/session", body ?? {}),
+
   walletProvision: (userId: string) =>
     req<{ ok: boolean; wallet: { address: string; walletType: string; chain: string } }>(
       "POST",
