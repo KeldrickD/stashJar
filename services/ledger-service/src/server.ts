@@ -383,6 +383,10 @@ function addDaysUtc(d: Date, n: number) {
   return new Date(d.getTime() + n * 24 * 60 * 60 * 1000);
 }
 
+function secondsUntil(d: Date): number {
+  return Math.max(0, Math.floor((d.getTime() - Date.now()) / 1000));
+}
+
 function clampNumber(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
@@ -3197,6 +3201,27 @@ app.post("/funding/session", { preHandler: [requireAuth] }, async (req, reply) =
     return reply.code(429).header("Retry-After", "60").send({ error: "rate_limit", retryAfterSeconds: 60 });
   }
 
+  const now = new Date();
+  const sod = utcDateOnly(now);
+  const nextDayUtc = addDaysUtc(sod, 1);
+  const sessionsToday = await prisma.fundingSession.count({
+    where: { userId, createdAt: { gte: sod, lt: nextDayUtc } },
+  });
+  if (Number.isFinite(sessionLimits.sessionsPerDay) && sessionsToday >= sessionLimits.sessionsPerDay) {
+    const retryAfterSeconds = secondsUntil(nextDayUtc);
+    reply.header("Cache-Control", "no-store");
+    return reply
+      .code(429)
+      .header("Retry-After", String(retryAfterSeconds))
+      .send({
+        error: "daily_limit",
+        retryAfterSeconds,
+        nextAllowedAt: nextDayUtc.toISOString(),
+        limitPerDay: sessionLimits.sessionsPerDay,
+        usedToday: sessionsToday,
+      });
+  }
+
   const parsed = FundingSessionSchema.safeParse((req.body as any) ?? {});
   const returnTo = parsed.success ? sanitizeReturnTo(parsed.data.returnTo) ?? undefined : undefined;
   const context = parsed.success ? parsed.data.context : undefined;
@@ -3221,6 +3246,10 @@ app.post("/funding/session", { preHandler: [requireAuth] }, async (req, reply) =
     app.log.warn({ userId, statusCode: result.statusCode, error: result.error }, "CDP session token failed");
     return reply.code(503).send({ error: "session_token_failed" });
   }
+
+  await prisma.fundingSession.create({
+    data: { userId, provider: "coinbase", context: context ?? null },
+  });
 
   reply.header("Cache-Control", "no-store");
   reply.header("X-Build", BUILD_TIMESTAMP);
@@ -3292,13 +3321,16 @@ app.post("/users/:userId/funding/refresh", { preHandler: [requireAuth, requireUs
   const creditsToday = creditsTodayAgg._sum.amountCents ?? 0;
   const creditHeadroom = Math.max(0, maxCreditsPerDay - creditsToday);
   if (creditHeadroom <= 0) {
+    const retryAfterSeconds = secondsUntil(startOfNextDayUTC);
     return reply
       .code(429)
-      .header("Retry-After", "60")
+      .header("Retry-After", String(retryAfterSeconds))
       .send({
         error: "daily_limit",
-        retryAfterSeconds: 60,
+        retryAfterSeconds,
+        nextAllowedAt: startOfNextDayUTC.toISOString(),
         maxCreditsPerDayCents: maxCreditsPerDay,
+        usedCents: creditsToday,
       });
   }
 

@@ -23,6 +23,115 @@ async function req<T>(method: string, path: string, body?: any): Promise<T> {
   return data as T;
 }
 
+// ---------- Shared error shapes ----------
+export type ApiRateLimitError = {
+  error: "rate_limit";
+  retryAfterSeconds: number;
+};
+
+export type ApiDailyLimitError = {
+  error: "daily_limit";
+  retryAfterSeconds: number;
+  nextAllowedAt: string; // ISO
+};
+
+export type ApiDailyLimitErrorWithUsage = ApiDailyLimitError & {
+  limitPerDay?: number;
+  usedToday?: number;
+  maxCreditsPerDayCents?: number;
+  usedCents?: number;
+  limitCents?: number;
+};
+
+export type ApiErrorBody =
+  | ApiRateLimitError
+  | ApiDailyLimitErrorWithUsage
+  | { error: "unauthorized" }
+  | { error: "forbidden" }
+  | { error: "not_found" }
+  | { error: string; retryAfterSeconds?: number; nextAllowedAt?: string };
+
+// ---------- Funding Session ----------
+export type FundingSessionOk = {
+  provider: "coinbase";
+  enabled: true;
+  sessionToken: string;
+  expiresAt: string;
+  wallet: { chain: string; address: `0x${string}` };
+  ui: { mode: "fundcard"; title: string; asset: "USDC" };
+};
+
+export type FundingSessionError =
+  | ApiRateLimitError
+  | (ApiDailyLimitError & { limitPerDay: number; usedToday: number })
+  | { error: "wallet_not_ready" }
+  | { error: "funding_disabled" }
+  | { error: "funding_session_not_configured" }
+  | { error: "session_token_failed" };
+
+export type FundingSessionResponse = FundingSessionOk | FundingSessionError;
+
+// ---------- Funding Refresh ----------
+export type FundingRefreshOk = {
+  userId: string;
+  wallet?: { chain: string; address: string };
+  observed: {
+    walletUsdcBalanceMicros: string;
+    asOf: string;
+  };
+  accounting: {
+    accountedPrincipalUsdcMicrosBefore: string;
+    accountedPrincipalUsdcMicrosAfter: string;
+    deltaMicros: string;
+    deltaCents: number;
+  };
+  result:
+    | { status: "SETTLED"; createdPaymentIntents: number; paymentIntentIds: string[] }
+    | { status: "NO_CHANGE"; createdPaymentIntents: 0; paymentIntentIds: [] };
+};
+
+export type FundingRefreshError =
+  | ApiRateLimitError
+  | (ApiDailyLimitError & { maxCreditsPerDayCents: number; usedCents: number })
+  | { error: "wallet_not_ready" }
+  | { error: "funding_disabled" }
+  | { error: "chain_unavailable" }
+  | { error: string };
+
+export type FundingRefreshResponse = FundingRefreshOk | FundingRefreshError;
+
+// ---------- UI helper: normalize retry info ----------
+export type RetryInfo = {
+  kind: "rate_limit" | "daily_limit";
+  retryAfterSeconds: number;
+  nextAllowedAt?: string;
+};
+
+export function getRetryInfo(err: unknown): RetryInfo | null {
+  let e: Record<string, unknown> | null = null;
+  if (err && typeof err === "object" && "error" in (err as object)) {
+    e = err as Record<string, unknown>;
+  } else if (err instanceof Error && err.message) {
+    try {
+      e = JSON.parse(err.message) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+  if (!e) return null;
+  if (e.error === "rate_limit" && typeof e.retryAfterSeconds === "number") {
+    return { kind: "rate_limit", retryAfterSeconds: e.retryAfterSeconds };
+  }
+  if (e.error === "daily_limit" && typeof e.retryAfterSeconds === "number") {
+    return {
+      kind: "daily_limit",
+      retryAfterSeconds: e.retryAfterSeconds,
+      nextAllowedAt: typeof e.nextAllowedAt === "string" ? e.nextAllowedAt : undefined,
+    };
+  }
+  return null;
+}
+
 export type TodayCard =
   | {
       type: "weather_wednesday";
@@ -247,17 +356,10 @@ export const api = {
     }>("GET", `/users/${userId}/home`),
 
   fundingRefresh: (userId: string, body?: { mode?: string; clientContext?: Record<string, string> }) =>
-    req<any>("POST", `/users/${userId}/funding/refresh`, body ?? {}),
+    req<FundingRefreshOk>("POST", `/users/${userId}/funding/refresh`, body ?? {}),
 
   getFundingSession: (body?: { returnTo?: string; context?: "pwa" | "miniapp" }) =>
-    req<{
-      provider: string;
-      enabled: boolean;
-      sessionToken: string;
-      expiresAt: string;
-      wallet: { chain: string; address: string };
-      ui: { mode: string; title: string; asset: string };
-    }>("POST", "/funding/session", body ?? {}),
+    req<FundingSessionOk>("POST", "/funding/session", body ?? {}),
 
   walletProvision: (userId: string) =>
     req<{ ok: boolean; wallet: { address: string; walletType: string; chain: string } }>(

@@ -58,6 +58,7 @@ export default function Home() {
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [lastFundingRefreshAt, setLastFundingRefreshAt] = useState<string | null>(null);
   const [fundingBusy, setFundingBusy] = useState<boolean>(false);
+  const [maxCreditsPerDayCents, setMaxCreditsPerDayCents] = useState<number | undefined>(undefined);
 
   const [depositDollars, setDepositDollars] = useState("10");
   const [withdrawDollars, setWithdrawDollars] = useState("5");
@@ -86,6 +87,7 @@ export default function Home() {
       setWalletReady(!!(home as any).wallet?.ready);
       setWalletAddress((home as any).wallet?.address ?? null);
       setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
+      setMaxCreditsPerDayCents((home as any).funding?.limits?.maxCreditsPerDayCents ?? undefined);
       setTier(home.config.tier);
       setFlags(home.config.flags);
       setTodayCards(home.today.cards ?? []);
@@ -118,7 +120,9 @@ export default function Home() {
   }
 
   async function addMoneyRefresh(): Promise<
-    { status?: string; createdPaymentIntents?: number; deltaCents?: number } | void
+    | { status?: string; createdPaymentIntents?: number; deltaCents?: number }
+    | { error: "daily_limit"; retryAfterSeconds: number; nextAllowedAt: string }
+    | void
   > {
     if (!userId) return;
     setFundingBusy(true);
@@ -131,6 +135,19 @@ export default function Home() {
       const deltaCents = res?.accounting?.deltaCents ?? res?.accounting?.unallocatedDeltaCents ?? 0;
       return { status: status ?? undefined, createdPaymentIntents: created, deltaCents };
     } catch (e: any) {
+      try {
+        const msg = e?.message;
+        if (typeof msg === "string") {
+          const d = JSON.parse(msg) as {
+            error?: string;
+            retryAfterSeconds?: number;
+            nextAllowedAt?: string;
+          };
+          if (d?.error === "daily_limit" && d.retryAfterSeconds != null && d.nextAllowedAt) {
+            return { error: "daily_limit", retryAfterSeconds: d.retryAfterSeconds, nextAllowedAt: d.nextAllowedAt };
+          }
+        }
+      } catch {}
       setToastMsg(e?.message ?? "Refresh failed");
       return undefined;
     } finally {
@@ -190,6 +207,7 @@ export default function Home() {
           setWalletReady(!!(home as any).wallet?.ready);
           setWalletAddress((home as any).wallet?.address ?? null);
           setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
+          setMaxCreditsPerDayCents((home as any).funding?.limits?.maxCreditsPerDayCents ?? undefined);
           setTier(home.config.tier);
           setFlags(home.config.flags);
           setTodayCards(home.today.cards ?? []);
@@ -263,6 +281,7 @@ export default function Home() {
       setWalletReady(!!(home as any).wallet?.ready);
       setWalletAddress((home as any).wallet?.address ?? null);
       setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
+      setMaxCreditsPerDayCents((home as any).funding?.limits?.maxCreditsPerDayCents ?? undefined);
       setTier(home.config.tier);
       setFlags(home.config.flags);
       setTodayCards(home.today.cards ?? []);
@@ -378,6 +397,7 @@ export default function Home() {
           onRefreshHome={refreshEverything}
           walletReady={walletReady}
           setToast={setToastMsg}
+          maxCreditsPerDayCents={maxCreditsPerDayCents}
         />
       )}
 

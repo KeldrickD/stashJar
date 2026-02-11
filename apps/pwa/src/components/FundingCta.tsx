@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api } from "@/lib/api";
+import { api, getRetryInfo } from "@/lib/api";
 import { FundingModal } from "./FundingModal";
 
 const POLL_INTERVAL_MS = 5_000;
@@ -16,6 +16,13 @@ function formatLastChecked(iso: string | null | undefined): string | null {
   return `${min}m ago`;
 }
 
+function formatResetsIn(retryAfterSeconds: number): string {
+  const h = Math.floor(retryAfterSeconds / 3600);
+  const m = Math.floor((retryAfterSeconds % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
 type Props = {
   walletAddress: string | null;
   enabled: boolean;
@@ -26,6 +33,8 @@ type Props = {
   onRefreshHome: () => void;
   walletReady: boolean;
   setToast: (msg: string) => void;
+  /** From home.funding.limits.maxCreditsPerDayCents (POWER tier) */
+  maxCreditsPerDayCents?: number;
 };
 
 export function FundingCta({
@@ -38,11 +47,13 @@ export function FundingCta({
   onRefreshHome,
   walletReady,
   setToast,
+  maxCreditsPerDayCents,
 }: Props) {
   const [polling, setPolling] = useState(false);
   const [showFundingModal, setShowFundingModal] = useState(false);
   const [fundingSessionToken, setFundingSessionToken] = useState<string | null>(null);
   const [sessionLoading, setSessionLoading] = useState(false);
+  const [dailyLimitResetIn, setDailyLimitResetIn] = useState<string | null>(null);
   const pollUntil = useRef<number>(0);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -64,7 +75,18 @@ export function FundingCta({
         return;
       }
       const res = await onAddMoney();
-      const result = res as { status?: string; createdPaymentIntents?: number; deltaCents?: number } | undefined;
+      const result = res as
+        | { status?: string; createdPaymentIntents?: number; deltaCents?: number }
+        | { error: "daily_limit"; retryAfterSeconds: number; nextAllowedAt: string }
+        | undefined;
+      if (result && "error" in result && result.error === "daily_limit") {
+        setPolling(false);
+        if (pollTimer.current) clearInterval(pollTimer.current);
+        pollTimer.current = null;
+        setToast("Daily limit reached — resets at midnight UTC");
+        setDailyLimitResetIn(formatResetsIn(result.retryAfterSeconds));
+        return;
+      }
       if (result?.status === "SETTLED" && (result?.createdPaymentIntents ?? 0) > 0) {
         setPolling(false);
         if (pollTimer.current) clearInterval(pollTimer.current);
@@ -81,21 +103,41 @@ export function FundingCta({
   }, [polling, onAddMoney, onRefreshHome, setToast]);
 
   const handleAddMoney = async () => {
-    const res = await onAddMoney();
-    onRefreshHome();
-    const result = res as { status?: string; createdPaymentIntents?: number; deltaCents?: number } | undefined;
-    if (result?.status === "SETTLED" && (result?.createdPaymentIntents ?? 0) > 0) {
-      const cents = result?.deltaCents ?? 0;
-      setToast(cents > 0 ? `Added $${(cents / 100).toFixed(2)} ✅` : "Added ✅");
-    } else if (result?.status === "NO_CHANGE") {
-      setToast("Nothing new yet — try again in a moment.");
-      setPolling(true);
-      pollUntil.current = Date.now() + POLL_MAX_DURATION_MS;
+    setDailyLimitResetIn(null);
+    try {
+      const res = await onAddMoney();
+      const result = res as
+        | { status?: string; createdPaymentIntents?: number; deltaCents?: number }
+        | { error: "daily_limit"; retryAfterSeconds: number; nextAllowedAt: string }
+        | undefined;
+      if (result && "error" in result && result.error === "daily_limit") {
+        setToast("Daily limit reached — resets at midnight UTC");
+        setDailyLimitResetIn(formatResetsIn(result.retryAfterSeconds));
+        return;
+      }
+      onRefreshHome();
+      if (result?.status === "SETTLED" && (result?.createdPaymentIntents ?? 0) > 0) {
+        const cents = result?.deltaCents ?? 0;
+        setToast(cents > 0 ? `Added $${(cents / 100).toFixed(2)} ✅` : "Added ✅");
+      } else if (result?.status === "NO_CHANGE") {
+        setToast("Nothing new yet — try again in a moment.");
+        setPolling(true);
+        pollUntil.current = Date.now() + POLL_MAX_DURATION_MS;
+      }
+    } catch (e) {
+      const retry = getRetryInfo(e);
+      if (retry?.kind === "daily_limit") {
+        setToast("Daily limit reached — resets at midnight UTC");
+        setDailyLimitResetIn(formatResetsIn(retry.retryAfterSeconds));
+      } else {
+        setToast((e as Error)?.message ?? "Refresh failed");
+      }
     }
   };
 
   const handleAddMoneyClick = async () => {
     setSessionLoading(true);
+    setDailyLimitResetIn(null);
     try {
       const session = await api.getFundingSession({ context: "pwa" });
       if (session?.sessionToken) {
@@ -104,7 +146,14 @@ export function FundingCta({
         setSessionLoading(false);
         return;
       }
-    } catch {
+    } catch (e) {
+      const retry = getRetryInfo(e);
+      if (retry?.kind === "daily_limit") {
+        setToast("Daily add limit reached — resets at midnight UTC");
+        setDailyLimitResetIn(formatResetsIn(retry.retryAfterSeconds));
+        setSessionLoading(false);
+        return;
+      }
       // 501 or 503 or 409: fall back to manual refresh
     }
     setSessionLoading(false);
@@ -172,6 +221,12 @@ export function FundingCta({
       )}
       {!polling && lastChecked && (
         <p className="text-xs opacity-70">Last checked {lastChecked}</p>
+      )}
+      {dailyLimitResetIn && (
+        <p className="text-sm text-amber-700">Daily limit reached — resets in {dailyLimitResetIn}</p>
+      )}
+      {maxCreditsPerDayCents != null && maxCreditsPerDayCents > 0 && !dailyLimitResetIn && (
+        <p className="text-xs opacity-70">Daily add limit: ${(maxCreditsPerDayCents / 100).toFixed(0)}</p>
       )}
       <p className="text-xs opacity-70">
         Add money via Coinbase → tap <strong>Refresh</strong> if your balance doesn’t update in ~30s.

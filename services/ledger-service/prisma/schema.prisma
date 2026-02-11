@@ -84,6 +84,7 @@ model User {
   onchainActions   OnchainAction[]
   sessions         Session[]
   pushSubscriptions PushSubscription[]
+  fundingSessions   FundingSession[]
 
   // Streaks (daily completion = at least one challenge save that UTC day)
   currentStreakDays  Int     @default(0)
@@ -352,6 +353,18 @@ model UserWallet {
   lastFundingRefreshAt DateTime?
   /// Chain balance we last observed at lastFundingRefreshAt (for UI + idempotency)
   lastObservedBalanceMicros String?
+}
+
+model FundingSession {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider  String   @default("coinbase")
+  context   String?  // "pwa" | "miniapp"
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
 }
 
 model OnchainAction {
