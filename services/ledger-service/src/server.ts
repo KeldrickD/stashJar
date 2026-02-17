@@ -52,6 +52,7 @@ const EnvSchema = z.object({
   CDP_PROJECT_ID: z.string().optional(),
   CDP_API_KEY: z.string().optional(),
   FUNDING_SESSION_TTL_MIN: z.string().optional().transform((s) => (s ? Number(s) : 10)),
+  MINIAPP_FUND_DEEPLINK: z.string().optional(),
 });
 const env = EnvSchema.safeParse(process.env);
 if (!env.success) {
@@ -1127,6 +1128,7 @@ function buildWalletAndFunding(
     } | null;
   },
   flags: Record<string, boolean>,
+  context: "pwa" | "miniapp" = "pwa",
 ) {
   const uw = user.wallet;
   const ready = !!uw?.address;
@@ -1158,9 +1160,12 @@ function buildWalletAndFunding(
         ui: {
           primaryCtaLabel: "Add money",
           secondaryCtaLabel: "Withdraw",
-          mode: "fundcard",
+          mode: (context === "miniapp" ? "open_in_wallet" : "fundcard") as "fundcard" | "open_in_wallet",
           title: "Add money",
           asset: "USDC",
+          ...(context === "miniapp" && env.data.MINIAPP_FUND_DEEPLINK?.trim()
+            ? { deeplink: env.data.MINIAPP_FUND_DEEPLINK.trim() }
+            : {}),
           helperText:
             "Use a debit card or bank transfer. After you finish, come back here to see your balance.",
         },
@@ -1173,6 +1178,121 @@ function buildWalletAndFunding(
       };
 
   return { wallet, funding };
+}
+
+const HomeQuerySchema = z.object({
+  context: z.enum(["pwa", "miniapp"]).optional(),
+});
+
+type FeatureActions = {
+  canFund: boolean;
+  canWithdrawToWallet: boolean;
+  canWithdrawToBank: boolean;
+  canDiceTwoDice: boolean;
+  canDiceMultiplier10: boolean;
+  canDiceChooseSides: boolean;
+  canEnvelopesTwoPerDay: boolean;
+  canEnvelopesWeeklyCadence: boolean;
+  canEnvelopesReverseOrder: boolean;
+  canStreakShield: boolean;
+  canMakeupSave: boolean;
+  canPushReminders: boolean;
+  canWeeklyRecapEmail: boolean;
+};
+
+type TierLimits = {
+  fundingSessionsPerMinute: number;
+  fundingSessionsPerDay: number;
+  maxCreditPerCallCents: number;
+  maxCreditsPerDayCents: number;
+  minDepositCents: number;
+  maxDepositCents: number;
+  withdrawDailyLimitCents: number;
+  dailyAutoSaveCapCents: number;
+  perRunAutoSaveCapCents: number;
+  maxSingleTempSaveCents: number;
+};
+
+function isPowerOrDev(tier: string): boolean {
+  return tier === "POWER" || tier === "DEV";
+}
+
+function buildFeatureActions(params: {
+  tier: string;
+  resolvedFlags: Record<string, unknown>;
+}): FeatureActions {
+  const { tier, resolvedFlags } = params;
+  const power = isPowerOrDev(tier);
+  return {
+    canFund: isFundingConfigured(),
+    canWithdrawToWallet: resolvedFlags.enableOnchainWithdrawToWallet === true,
+    canWithdrawToBank: false,
+    canDiceTwoDice: power,
+    canDiceMultiplier10: power,
+    canDiceChooseSides: power,
+    canEnvelopesTwoPerDay: power,
+    canEnvelopesWeeklyCadence: power,
+    canEnvelopesReverseOrder: power,
+    canStreakShield: power,
+    canMakeupSave: power,
+    canPushReminders: PUSH_ENABLED,
+    canWeeklyRecapEmail: power,
+  };
+}
+
+function buildTierLimits(params: {
+  tier: string;
+  rawFlags: Record<string, unknown> | null | undefined;
+}): TierLimits {
+  const { tier, rawFlags } = params;
+  const flags = rawFlags ?? {};
+  const fundingSession = getFundingSessionLimits(tier, flags);
+  const fundingRefresh = getFundingRefreshLimits(tier, flags);
+  const withdrawDailyLimitCents = getWithdrawDailyLimitCents(tier, flags);
+  const dailyAutoSaveCapCents =
+    typeof flags.dailyCapCents === "number"
+      ? flags.dailyCapCents
+      : isPowerOrDev(tier)
+        ? 40_000
+        : 5_000;
+  const perRunAutoSaveCapCents =
+    typeof flags.perRunCapCents === "number" ? flags.perRunCapCents : 20_000;
+  const maxSingleTempSaveCents =
+    typeof flags.maxSingleTempSaveCents === "number"
+      ? flags.maxSingleTempSaveCents
+      : tier === "DEV"
+        ? 50_000
+        : tier === "POWER"
+          ? 20_000
+          : 5_000;
+
+  return {
+    fundingSessionsPerMinute: fundingSession.sessionsPerMinute,
+    fundingSessionsPerDay: fundingSession.sessionsPerDay,
+    maxCreditPerCallCents: fundingRefresh.maxCreditPerCallCents,
+    maxCreditsPerDayCents: fundingRefresh.maxCreditsPerDayCents,
+    minDepositCents: fundingSession.minDepositCents,
+    maxDepositCents: fundingSession.maxDepositCents,
+    withdrawDailyLimitCents,
+    dailyAutoSaveCapCents,
+    perRunAutoSaveCapCents,
+    maxSingleTempSaveCents,
+  };
+}
+
+function buildUserConfig(params: {
+  tier: string;
+  rawFlags: Record<string, unknown> | null | undefined;
+}) {
+  const resolvedFlags = resolveFlags(params.tier as any, params.rawFlags);
+  const actions = buildFeatureActions({ tier: params.tier, resolvedFlags: resolvedFlags as Record<string, unknown> });
+  const limits = buildTierLimits({ tier: params.tier, rawFlags: params.rawFlags });
+  return {
+    tier: params.tier,
+    flags: resolvedFlags,
+    actions,
+    limits,
+  };
 }
 
 app.get("/auth/me", async (req, reply) => {
@@ -2221,13 +2341,13 @@ app.get("/users/:userId/config", { preHandler: [requireAuth, requireUserIdMatch]
   });
   if (!user) return reply.code(404).send({ error: "User not found" });
 
-  const flags = resolveFlags(user.tier as any, user.flags);
-  const withdrawDailyLimitCents = getWithdrawDailyLimitCents(user.tier as any);
+  const config = buildUserConfig({
+    tier: user.tier as string,
+    rawFlags: (user.flags as Record<string, unknown> | null) ?? null,
+  });
   const payload = {
     userId: user.id,
-    tier: user.tier,
-    flags,
-    ...(withdrawDailyLimitCents > 0 && { withdrawDailyLimitCents }),
+    ...config,
   };
   const etag = weakEtag("cfg", stableStringify(payload));
   const cacheControl = "private, max-age=300";
@@ -3071,6 +3191,10 @@ app.get("/users/:userId/streak", { preHandler: [requireAuth, requireUserIdMatch]
 app.get("/users/:userId/home", { preHandler: [requireAuth, requireUserIdMatch] }, async (req, reply) => {
   const userId = (req.params as any).userId as string;
   const startTime = Date.now();
+  const parsedHomeQuery = HomeQuerySchema.safeParse((req as any).query ?? {});
+  const context: "pwa" | "miniapp" = parsedHomeQuery.success
+    ? (parsedHomeQuery.data.context ?? "pwa")
+    : "pwa";
 
   const user = await prisma.user.findUnique({
     where: { id: userId },
@@ -3104,12 +3228,12 @@ app.get("/users/:userId/home", { preHandler: [requireAuth, requireUserIdMatch] }
   const vaultValueCents = Number(vaultMicros / 10_000n);
   const totalDisplayCents = stashBalanceCents + vaultValueCents;
 
-  const config = {
-    tier: user.tier,
-    flags: resolveFlags(user.tier as any, user.flags),
-  };
+  const config = buildUserConfig({
+    tier: user.tier as string,
+    rawFlags: (user.flags as Record<string, unknown> | null) ?? null,
+  });
   const flags = config.flags as Record<string, boolean>;
-  const { wallet, funding } = buildWalletAndFunding(user, flags);
+  const { wallet, funding } = buildWalletAndFunding(user, flags, context);
 
   const stash: Record<string, unknown> = {
     stashBalanceCents,
@@ -3351,7 +3475,8 @@ app.post("/users/:userId/funding/refresh", { preHandler: [requireAuth, requireUs
     return reply.send({
       userId,
       wallet: { chain: uw.chain, address: uw.address },
-      observed: { walletUsdcBalanceMicros: balanceMicros.toString(), asOf: asOf.toISOString() },
+      asOf: asOf.toISOString(),
+      observed: { walletAddress: uw.address, walletUsdcBalanceMicros: balanceMicros.toString() },
       accounting: {
         accountedPrincipalUsdcMicrosBefore: accountedBefore.toString(),
         accountedPrincipalUsdcMicrosAfter: accountedBefore.toString(),
@@ -3377,7 +3502,8 @@ app.post("/users/:userId/funding/refresh", { preHandler: [requireAuth, requireUs
       return reply.send({
         userId,
         wallet: { chain: uw.chain, address: uw.address },
-        observed: { walletUsdcBalanceMicros: balanceMicros.toString(), asOf: asOf.toISOString() },
+        asOf: asOf.toISOString(),
+        observed: { walletAddress: uw.address, walletUsdcBalanceMicros: balanceMicros.toString() },
         accounting: {
           accountedPrincipalUsdcMicrosBefore: accountedBefore.toString(),
           accountedPrincipalUsdcMicrosAfter: accountedBefore.toString(),
@@ -3432,7 +3558,8 @@ app.post("/users/:userId/funding/refresh", { preHandler: [requireAuth, requireUs
   return reply.send({
     userId,
     wallet: { chain: uw.chain, address: uw.address },
-    observed: { walletUsdcBalanceMicros: balanceMicros.toString(), asOf: asOf.toISOString() },
+    asOf: asOf.toISOString(),
+    observed: { walletAddress: uw.address, walletUsdcBalanceMicros: balanceMicros.toString() },
     accounting: {
       accountedPrincipalUsdcMicrosBefore: accountedBefore.toString(),
       accountedPrincipalUsdcMicrosAfter: accountedAfter.toString(),

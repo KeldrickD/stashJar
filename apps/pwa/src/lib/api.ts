@@ -23,35 +23,34 @@ async function req<T>(method: string, path: string, body?: any): Promise<T> {
   return data as T;
 }
 
-// ---------- Shared error shapes ----------
-export type ApiRateLimitError = {
+// ---------- 429 and funding response types (match backend: wallet_not_ready, chain_unavailable) ----------
+
+/** 429 per-minute limiter */
+export type RateLimit429 = {
   error: "rate_limit";
   retryAfterSeconds: number;
 };
 
-export type ApiDailyLimitError = {
+/** 429 daily limiter (resets at UTC midnight) */
+export type DailyLimit429 = {
   error: "daily_limit";
   retryAfterSeconds: number;
-  nextAllowedAt: string; // ISO
+  nextAllowedAt: string;
 };
 
-export type ApiDailyLimitErrorWithUsage = ApiDailyLimitError & {
-  limitPerDay?: number;
-  usedToday?: number;
+/** 429 for POST /funding/session */
+export type FundingSessionDailyLimit429 = DailyLimit429 & {
+  limitPerDay: number;
+  usedToday: number;
+};
+
+/** 429 for POST /users/:id/funding/refresh */
+export type FundingRefreshDailyLimit429 = DailyLimit429 & {
+  usedCents: number;
   maxCreditsPerDayCents?: number;
-  usedCents?: number;
-  limitCents?: number;
 };
 
-export type ApiErrorBody =
-  | ApiRateLimitError
-  | ApiDailyLimitErrorWithUsage
-  | { error: "unauthorized" }
-  | { error: "forbidden" }
-  | { error: "not_found" }
-  | { error: string; retryAfterSeconds?: number; nextAllowedAt?: string };
-
-// ---------- Funding Session ----------
+/** POST /funding/session 200 */
 export type FundingSessionOk = {
   provider: "coinbase";
   enabled: true;
@@ -61,23 +60,25 @@ export type FundingSessionOk = {
   ui: { mode: "fundcard"; title: string; asset: "USDC" };
 };
 
+/** POST /funding/session non-200 */
 export type FundingSessionError =
-  | ApiRateLimitError
-  | (ApiDailyLimitError & { limitPerDay: number; usedToday: number })
+  | RateLimit429
+  | FundingSessionDailyLimit429
   | { error: "wallet_not_ready" }
-  | { error: "funding_disabled" }
   | { error: "funding_session_not_configured" }
+  | { error: "funding_disabled" }
   | { error: "session_token_failed" };
 
 export type FundingSessionResponse = FundingSessionOk | FundingSessionError;
 
-// ---------- Funding Refresh ----------
+/** POST /users/:id/funding/refresh 200 */
 export type FundingRefreshOk = {
   userId: string;
-  wallet?: { chain: string; address: string };
+  asOf: string;
+  wallet: { chain: string; address: `0x${string}` };
   observed: {
+    walletAddress: `0x${string}`;
     walletUsdcBalanceMicros: string;
-    asOf: string;
   };
   accounting: {
     accountedPrincipalUsdcMicrosBefore: string;
@@ -87,20 +88,21 @@ export type FundingRefreshOk = {
   };
   result:
     | { status: "SETTLED"; createdPaymentIntents: number; paymentIntentIds: string[] }
-    | { status: "NO_CHANGE"; createdPaymentIntents: 0; paymentIntentIds: [] };
+    | { status: "NO_CHANGE" };
 };
 
+/** POST /users/:id/funding/refresh non-200 */
 export type FundingRefreshError =
-  | ApiRateLimitError
-  | (ApiDailyLimitError & { maxCreditsPerDayCents: number; usedCents: number })
+  | RateLimit429
+  | FundingRefreshDailyLimit429
   | { error: "wallet_not_ready" }
   | { error: "funding_disabled" }
   | { error: "chain_unavailable" }
-  | { error: string };
+  | { error: "chain_error" };
 
 export type FundingRefreshResponse = FundingRefreshOk | FundingRefreshError;
 
-// ---------- UI helper: normalize retry info ----------
+/** Helper for UI: consistent countdown. Works with req() that throws new Error(JSON.stringify(body)). */
 export type RetryInfo = {
   kind: "rate_limit" | "daily_limit";
   retryAfterSeconds: number;
@@ -108,26 +110,28 @@ export type RetryInfo = {
 };
 
 export function getRetryInfo(err: unknown): RetryInfo | null {
-  let e: Record<string, unknown> | null = null;
-  if (err && typeof err === "object" && "error" in (err as object)) {
-    e = err as Record<string, unknown>;
-  } else if (err instanceof Error && err.message) {
+  const extract = (o: Record<string, unknown> | null): RetryInfo | null => {
+    if (!o || typeof o !== "object") return null;
+    if (o.error === "rate_limit" && typeof o.retryAfterSeconds === "number") {
+      return { kind: "rate_limit", retryAfterSeconds: o.retryAfterSeconds };
+    }
+    if (o.error === "daily_limit" && typeof o.retryAfterSeconds === "number") {
+      return {
+        kind: "daily_limit",
+        retryAfterSeconds: o.retryAfterSeconds,
+        nextAllowedAt: typeof o.nextAllowedAt === "string" ? o.nextAllowedAt : undefined,
+      };
+    }
+    return null;
+  };
+  const direct = extract(err as Record<string, unknown>);
+  if (direct) return direct;
+  if (err instanceof Error && err.message) {
     try {
-      e = JSON.parse(err.message) as Record<string, unknown>;
+      return extract(JSON.parse(err.message) as Record<string, unknown>);
     } catch {
       return null;
     }
-  }
-  if (!e) return null;
-  if (e.error === "rate_limit" && typeof e.retryAfterSeconds === "number") {
-    return { kind: "rate_limit", retryAfterSeconds: e.retryAfterSeconds };
-  }
-  if (e.error === "daily_limit" && typeof e.retryAfterSeconds === "number") {
-    return {
-      kind: "daily_limit",
-      retryAfterSeconds: e.retryAfterSeconds,
-      nextAllowedAt: typeof e.nextAllowedAt === "string" ? e.nextAllowedAt : undefined,
-    };
   }
   return null;
 }
@@ -213,6 +217,48 @@ export type TodayResponse = {
   cards: TodayCard[];
 };
 
+export type HomeContext = "pwa" | "miniapp";
+
+export type Tier = "NORMIE" | "CURIOUS" | "POWER" | "DEV";
+export type FundingUiMode = "fundcard" | "open_in_wallet";
+
+export type FeatureActions = {
+  canFund: boolean;
+  canWithdrawToWallet: boolean;
+  canWithdrawToBank: boolean;
+  canDiceTwoDice: boolean;
+  canDiceMultiplier10: boolean;
+  canDiceChooseSides: boolean;
+  canEnvelopesTwoPerDay: boolean;
+  canEnvelopesWeeklyCadence: boolean;
+  canEnvelopesReverseOrder: boolean;
+  canStreakShield: boolean;
+  canMakeupSave: boolean;
+  canPushReminders: boolean;
+  canWeeklyRecapEmail: boolean;
+};
+
+export type TierLimits = {
+  fundingSessionsPerMinute: number;
+  fundingSessionsPerDay: number;
+  maxCreditPerCallCents: number;
+  maxCreditsPerDayCents: number;
+  minDepositCents: number;
+  maxDepositCents: number;
+  withdrawDailyLimitCents: number;
+  dailyAutoSaveCapCents: number;
+  perRunAutoSaveCapCents: number;
+  maxSingleTempSaveCents: number;
+};
+
+export type UserConfigResponse = {
+  userId: string;
+  tier: Tier;
+  flags: Record<string, unknown>;
+  actions: FeatureActions;
+  limits: TierLimits;
+};
+
 export type AuthMe = {
   userId: string;
   email?: string;
@@ -249,6 +295,9 @@ export const api = {
 
   getFlags: (userId: string) =>
     req<{ tier: string; flags: Record<string, boolean> }>("GET", `/users/${userId}/flags`),
+
+  getConfig: (userId: string) =>
+    req<UserConfigResponse>("GET", `/users/${userId}/config`),
 
   getTxHistory: (userId: string) =>
     req<{
@@ -303,27 +352,44 @@ export const api = {
   getTodayCards: (userId: string) =>
     req<TodayResponse>("GET", `/users/${userId}/challenges/today`),
 
-  getHome: (userId: string) =>
+  getHome: (userId: string, options?: { context?: HomeContext }) =>
     req<{
       userId?: string;
-      config: { tier: string; flags: Record<string, boolean> };
+      config: {
+        tier: Tier;
+        flags: Record<string, unknown>;
+        actions: FeatureActions;
+        limits: TierLimits;
+      };
       wallet?: {
         ready: boolean;
         provisioning?: boolean;
-        type: "SMART" | "EXTERNAL";
+        type: "SMART" | "EXTERNAL" | "EOA";
         chain: string;
         address: string | null;
       };
       funding?: {
         enabled: boolean;
-        provider?: string;
+        provider?: string | null;
         rail?: string;
-        minDepositCents?: number;
-        maxDepositCents?: number;
+        limits?: {
+          minDepositCents: number;
+          maxDepositCents: number;
+          maxCreditPerCallCents: number;
+          maxCreditsPerDayCents: number;
+        };
         reason?: "not_configured" | "wallet_not_ready";
         lastRefreshAt?: string | null;
         lastObservedBalanceMicros?: string | null;
-        ui?: { primaryCtaLabel: string; secondaryCtaLabel: string };
+        ui?: {
+          primaryCtaLabel: string;
+          secondaryCtaLabel: string;
+          mode?: FundingUiMode;
+          title?: string;
+          asset?: string;
+          deeplink?: string;
+          helperText?: string;
+        };
       };
       streak: {
         userId?: string;
@@ -353,7 +419,10 @@ export const api = {
         templateSlug: string | null;
         progress?: string;
       }>;
-    }>("GET", `/users/${userId}/home`),
+    }>(
+      "GET",
+      `/users/${userId}/home${options?.context ? `?context=${encodeURIComponent(options.context)}` : ""}`,
+    ),
 
   fundingRefresh: (userId: string, body?: { mode?: string; clientContext?: Record<string, string> }) =>
     req<FundingRefreshOk>("POST", `/users/${userId}/funding/refresh`, body ?? {}),

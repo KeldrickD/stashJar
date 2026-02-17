@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter, usePathname } from "next/navigation";
-import { api, TodayCard, TodayBanner } from "@/lib/api";
+import { useRouter, usePathname, useSearchParams } from "next/navigation";
+import { api, type FeatureActions, TodayCard, TodayBanner } from "@/lib/api";
 import { getUserId, setUserId as saveUserId, clearUserId } from "@/lib/session";
 import { ApplyMissedSavesBanner } from "@/components/ApplyMissedSavesBanner";
 import { FundingCta } from "@/components/FundingCta";
@@ -25,14 +25,33 @@ function getResetsInUtc(): string {
   return `${m}m`;
 }
 
+const DEFAULT_ACTIONS: FeatureActions = {
+  canFund: false,
+  canWithdrawToWallet: false,
+  canWithdrawToBank: false,
+  canDiceTwoDice: false,
+  canDiceMultiplier10: false,
+  canDiceChooseSides: false,
+  canEnvelopesTwoPerDay: false,
+  canEnvelopesWeeklyCadence: false,
+  canEnvelopesReverseOrder: false,
+  canStreakShield: false,
+  canMakeupSave: false,
+  canPushReminders: false,
+  canWeeklyRecapEmail: false,
+};
+
 export default function Home() {
   const router = useRouter();
   const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const homeContext: "pwa" | "miniapp" = searchParams?.get("context") === "miniapp" ? "miniapp" : "pwa";
   const [userId, setUser] = useState<string | null>(null);
   const [stashAccountId, setStashAccountId] = useState<string | null>(null);
   const [balanceCents, setBalanceCents] = useState<number>(0);
   const [tier, setTier] = useState<string>("NORMIE");
   const [flags, setFlags] = useState<Record<string, boolean>>({});
+  const [actions, setActions] = useState<FeatureActions>(DEFAULT_ACTIONS);
   const [status, setStatus] = useState<string>("");
   const [todayCards, setTodayCards] = useState<TodayCard[]>([]);
   const [todayBanner, setTodayBanner] = useState<TodayBanner | undefined>(undefined);
@@ -59,6 +78,9 @@ export default function Home() {
   const [lastFundingRefreshAt, setLastFundingRefreshAt] = useState<string | null>(null);
   const [fundingBusy, setFundingBusy] = useState<boolean>(false);
   const [maxCreditsPerDayCents, setMaxCreditsPerDayCents] = useState<number | undefined>(undefined);
+  const [fundingUiMode, setFundingUiMode] = useState<"fundcard" | "open_in_wallet">("fundcard");
+  const [fundingDeeplink, setFundingDeeplink] = useState<string | undefined>(undefined);
+  const [fundingHelperText, setFundingHelperText] = useState<string | undefined>(undefined);
 
   const [depositDollars, setDepositDollars] = useState("10");
   const [withdrawDollars, setWithdrawDollars] = useState("5");
@@ -80,7 +102,7 @@ export default function Home() {
       const uid = me.userId;
       saveUserId(uid);
       setUser(uid);
-      const home = await api.getHome(uid);
+      const home = await api.getHome(uid, { context: homeContext });
       setStashAccountId(home.stashAccountId);
       setBalanceCents(home.stash?.totalDisplayCents ?? (home as any).stashBalanceCents ?? 0);
       setFundingEnabled(!!(home as any).funding?.enabled);
@@ -88,8 +110,12 @@ export default function Home() {
       setWalletAddress((home as any).wallet?.address ?? null);
       setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
       setMaxCreditsPerDayCents((home as any).funding?.limits?.maxCreditsPerDayCents ?? undefined);
+      setFundingUiMode(((home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined) ?? "fundcard");
+      setFundingDeeplink((home as any).funding?.ui?.deeplink ?? undefined);
+      setFundingHelperText((home as any).funding?.ui?.helperText ?? undefined);
       setTier(home.config.tier);
-      setFlags(home.config.flags);
+      setFlags(home.config.flags as Record<string, boolean>);
+      setActions((home.config.actions as FeatureActions) ?? DEFAULT_ACTIONS);
       setTodayCards(home.today.cards ?? []);
       setTodayBanner(home.today.banner);
       setActiveChallenges(home.activeChallenges ?? []);
@@ -199,7 +225,7 @@ export default function Home() {
         setUser(uid);
 
         try {
-          const home = await api.getHome(uid!);
+          const home = await api.getHome(uid!, { context: homeContext });
           if (!alive) return;
           setStashAccountId(home.stashAccountId);
           setBalanceCents(home.stash?.totalDisplayCents ?? (home as any).stashBalanceCents ?? 0);
@@ -208,8 +234,12 @@ export default function Home() {
           setWalletAddress((home as any).wallet?.address ?? null);
           setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
           setMaxCreditsPerDayCents((home as any).funding?.limits?.maxCreditsPerDayCents ?? undefined);
+          setFundingUiMode(((home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined) ?? "fundcard");
+          setFundingDeeplink((home as any).funding?.ui?.deeplink ?? undefined);
+          setFundingHelperText((home as any).funding?.ui?.helperText ?? undefined);
           setTier(home.config.tier);
-          setFlags(home.config.flags);
+          setFlags(home.config.flags as Record<string, boolean>);
+          setActions((home.config.actions as FeatureActions) ?? DEFAULT_ACTIONS);
           setTodayCards(home.today.cards ?? []);
           setTodayBanner(home.today.banner);
           setActiveChallenges(home.activeChallenges ?? []);
@@ -235,7 +265,7 @@ export default function Home() {
     return () => {
       alive = false;
     };
-  }, [router, pathname]);
+  }, [router, pathname, homeContext]);
 
   useEffect(() => {
     if (!focusEventId) return;
@@ -274,7 +304,7 @@ export default function Home() {
     const uid = userId;
     if (!uid) return;
     try {
-      const home = await api.getHome(uid);
+      const home = await api.getHome(uid, { context: homeContext });
       setStashAccountId(home.stashAccountId);
       setBalanceCents(home.stash?.totalDisplayCents ?? (home as any).stashBalanceCents ?? 0);
       setFundingEnabled(!!(home as any).funding?.enabled);
@@ -282,8 +312,12 @@ export default function Home() {
       setWalletAddress((home as any).wallet?.address ?? null);
       setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
       setMaxCreditsPerDayCents((home as any).funding?.limits?.maxCreditsPerDayCents ?? undefined);
+      setFundingUiMode(((home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined) ?? "fundcard");
+      setFundingDeeplink((home as any).funding?.ui?.deeplink ?? undefined);
+      setFundingHelperText((home as any).funding?.ui?.helperText ?? undefined);
       setTier(home.config.tier);
-      setFlags(home.config.flags);
+      setFlags(home.config.flags as Record<string, boolean>);
+      setActions((home.config.actions as FeatureActions) ?? DEFAULT_ACTIONS);
       setTodayCards(home.today.cards ?? []);
       setTodayBanner(home.today.banner);
       setActiveChallenges(home.activeChallenges ?? []);
@@ -335,6 +369,18 @@ export default function Home() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    if (homeContext !== "miniapp") return;
+    if (!fundingEnabled || !walletReady) return;
+    if (fundingUiMode !== "open_in_wallet") return;
+    const onFocus = async () => {
+      await addMoneyRefresh();
+      await refreshEverything();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [homeContext, fundingEnabled, walletReady, fundingUiMode, userId]);
+
   return (
     <main className="mx-auto max-w-xl p-6 space-y-6">
       {toastMsg && (
@@ -370,13 +416,13 @@ export default function Home() {
         </div>
         <p className="text-sm opacity-70 flex items-center gap-2">
           Tier: {tier}
-          {(tier === "POWER" || tier === "DEV") && (
+          {actions.canDiceChooseSides && (
             <span className="text-xs font-medium bg-violet-100 text-violet-800 rounded px-1.5 py-0.5">POWER</span>
           )}
         </p>
       </header>
 
-      {userId && (
+      {userId && actions.canPushReminders && (
         <PushReminderToggle />
       )}
 
@@ -390,6 +436,10 @@ export default function Home() {
         <FundingCta
           walletAddress={walletAddress}
           enabled={fundingEnabled}
+          context={homeContext}
+          uiMode={fundingUiMode}
+          deeplink={fundingDeeplink}
+          helperText={fundingHelperText}
           lastRefreshAt={lastFundingRefreshAt}
           busy={fundingBusy}
           onSetUpWallet={ensureWalletThenRefresh}
@@ -452,7 +502,7 @@ export default function Home() {
               : "";
           return (
             <div key={key} id={id} className={highlight}>
-              {(tier === "POWER" || tier === "DEV") && (
+              {actions.canDiceChooseSides && (
                 <span className="text-xs font-medium text-violet-600 mb-1 inline-block">POWER</span>
               )}
               <TodayCardRenderer userId={userId} card={card} onDone={refreshEverything} />

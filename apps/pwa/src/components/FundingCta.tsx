@@ -26,6 +26,10 @@ function formatResetsIn(retryAfterSeconds: number): string {
 type Props = {
   walletAddress: string | null;
   enabled: boolean;
+  context?: "pwa" | "miniapp";
+  uiMode?: "fundcard" | "open_in_wallet";
+  deeplink?: string;
+  helperText?: string;
   lastRefreshAt: string | null | undefined;
   busy: boolean;
   onSetUpWallet: () => void;
@@ -40,6 +44,10 @@ type Props = {
 export function FundingCta({
   walletAddress,
   enabled,
+  context = "pwa",
+  uiMode = "fundcard",
+  deeplink,
+  helperText,
   lastRefreshAt,
   busy,
   onSetUpWallet,
@@ -136,10 +144,19 @@ export function FundingCta({
   };
 
   const handleAddMoneyClick = async () => {
+    if (uiMode === "open_in_wallet") {
+      if (deeplink) {
+        window.location.href = deeplink;
+        return;
+      }
+      await handleAddMoney();
+      return;
+    }
+
     setSessionLoading(true);
     setDailyLimitResetIn(null);
     try {
-      const session = await api.getFundingSession({ context: "pwa" });
+      const session = await api.getFundingSession({ context });
       if (session?.sessionToken) {
         setFundingSessionToken(session.sessionToken);
         setShowFundingModal(true);
@@ -229,7 +246,10 @@ export function FundingCta({
         <p className="text-xs opacity-70">Daily add limit: ${(maxCreditsPerDayCents / 100).toFixed(0)}</p>
       )}
       <p className="text-xs opacity-70">
-        Add money via Coinbase → tap <strong>Refresh</strong> if your balance doesn’t update in ~30s.
+        {helperText ??
+          "Add money via Coinbase → tap "}
+        {!helperText && <strong>Refresh</strong>}
+        {!helperText && " if your balance doesn’t update in ~30s."}
       </p>
     </section>
   );
