@@ -2,36 +2,28 @@
 
 import { useState } from "react";
 import { api } from "@/lib/api";
-
-type Card = {
-  type: "envelopes_100";
-  challengeId: string;
-  userChallengeId: string;
-  title: string;
-  prompt: string;
-  remainingCount: number;
-  usedCount: number;
-  min: number;
-  max: number;
-  unitAmountCents: number;
-  maxDrawsPerDay?: number;
-  drewToday?: boolean;
-};
+import type { EnvelopesTodayCard, FeatureActions } from "@/lib/api";
 
 type Props = {
-  userId?: string;
-  card: Card;
-  onDone: () => void;
+  userId: string;
+  card: EnvelopesTodayCard;
+  actions: FeatureActions;
+  onDone: () => void | Promise<void>;
 };
 
-export function EnvelopesCard({ card, onDone }: Props) {
+export function EnvelopesCard({ userId, card, actions, onDone }: Props) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [cadence, setCadence] = useState<"daily" | "weekly">(card.cadence ?? "daily");
+  const [order, setOrder] = useState<"random" | "reverse">(card.order ?? "random");
+  const [maxDrawsPerDay, setMaxDrawsPerDay] = useState<1 | 2>((card.maxDrawsPerDay ?? 1) >= 2 ? 2 : 1);
 
   const total = card.max - card.min + 1;
   const complete = card.usedCount;
   const pct = total > 0 ? Math.round((complete / total) * 100) : 0;
+  const canConfigure =
+    actions.canEnvelopesTwoPerDay || actions.canEnvelopesWeeklyCadence || actions.canEnvelopesReverseOrder;
 
   async function draw() {
     setErr(null);
@@ -65,10 +57,125 @@ export function EnvelopesCard({ card, onDone }: Props) {
     }
   }
 
+  async function saveSettings() {
+    setErr(null);
+    setMsg(null);
+    setBusy(true);
+    try {
+      await api.updateChallengeSettings(userId, card.userChallengeId, {
+        envelopes: {
+          cadence,
+          order,
+          maxDrawsPerDay,
+        },
+      });
+      setMsg("Envelope settings saved ✅");
+      await onDone();
+    } catch (e: any) {
+      setErr(e?.message ?? "Something went wrong");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="rounded-xl border p-5 space-y-3">
       <div className="text-lg font-semibold">{card.title}</div>
       <div className="text-sm opacity-70">{card.prompt}</div>
+
+      <div className="flex flex-wrap gap-2 text-xs opacity-70">
+        {actions.canEnvelopesTwoPerDay && (
+          <span className="rounded border px-2 py-1">
+            Max draws/day: {card.maxDrawsPerDay ?? 1}
+          </span>
+        )}
+        {actions.canEnvelopesWeeklyCadence && card.cadence && (
+          <span className="rounded border px-2 py-1">
+            Cadence: {card.cadence}
+          </span>
+        )}
+        {actions.canEnvelopesReverseOrder && card.order && (
+          <span className="rounded border px-2 py-1">
+            Order: {card.order}
+          </span>
+        )}
+      </div>
+
+      {canConfigure && (
+        <div className="space-y-2 rounded border p-3">
+          <div className="text-xs font-medium opacity-70">Settings</div>
+          <div className="flex flex-wrap gap-2">
+            {actions.canEnvelopesWeeklyCadence && (
+              <>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setCadence("daily")}
+                  className={`rounded border px-3 py-1.5 text-xs ${cadence === "daily" ? "bg-black text-white" : ""}`}
+                >
+                  Daily
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setCadence("weekly")}
+                  className={`rounded border px-3 py-1.5 text-xs ${cadence === "weekly" ? "bg-black text-white" : ""}`}
+                >
+                  Weekly
+                </button>
+              </>
+            )}
+            {actions.canEnvelopesReverseOrder && (
+              <>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setOrder("random")}
+                  className={`rounded border px-3 py-1.5 text-xs ${order === "random" ? "bg-black text-white" : ""}`}
+                >
+                  Random
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setOrder("reverse")}
+                  className={`rounded border px-3 py-1.5 text-xs ${order === "reverse" ? "bg-black text-white" : ""}`}
+                >
+                  Reverse
+                </button>
+              </>
+            )}
+            {actions.canEnvelopesTwoPerDay && (
+              <>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setMaxDrawsPerDay(1)}
+                  className={`rounded border px-3 py-1.5 text-xs ${maxDrawsPerDay === 1 ? "bg-black text-white" : ""}`}
+                >
+                  1/day
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setMaxDrawsPerDay(2)}
+                  className={`rounded border px-3 py-1.5 text-xs ${maxDrawsPerDay === 2 ? "bg-black text-white" : ""}`}
+                >
+                  2/day
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              disabled={busy}
+              onClick={saveSettings}
+              className="rounded border px-3 py-1.5 text-xs font-medium"
+            >
+              Save
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="flex items-center gap-2">
         <div className="flex-1 h-2 rounded-full bg-black/10 overflow-hidden">

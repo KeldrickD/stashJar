@@ -1166,8 +1166,9 @@ function buildWalletAndFunding(
           ...(context === "miniapp" && env.data.MINIAPP_FUND_DEEPLINK?.trim()
             ? { deeplink: env.data.MINIAPP_FUND_DEEPLINK.trim() }
             : {}),
-          helperText:
-            "Use a debit card or bank transfer. After you finish, come back here to see your balance.",
+          helperText: context === "miniapp"
+            ? "Open wallet, add funds, return to this app, and we will refresh your balance."
+            : "Use a debit card or bank transfer. After you finish, come back here to see your balance.",
         },
       }
     : {
@@ -1293,6 +1294,59 @@ function buildUserConfig(params: {
     actions,
     limits,
   };
+}
+
+type EffectiveDiceSettings = {
+  sides: 6 | 12 | 20 | 100;
+  multiDice: 1 | 2;
+  multiplier: 1 | 10;
+};
+
+type EffectiveEnvelopeSettings = {
+  cadence: "daily" | "weekly";
+  order: "random" | "reverse";
+  maxDrawsPerDay: 1 | 2;
+};
+
+function getEffectiveDiceSettings(params: {
+  rules: any;
+  settings: any;
+}): EffectiveDiceSettings {
+  const amount = params.rules?.amount ?? {};
+  const diceSettings = params.settings?.dice ?? {};
+  const sidesRaw = Number(diceSettings.sides ?? amount.sides ?? params.rules?.sides ?? 6);
+  const sides = [6, 12, 20, 100].includes(sidesRaw) ? (sidesRaw as 6 | 12 | 20 | 100) : 6;
+  let multiDiceRaw = Number(diceSettings.multiDice ?? amount.multiDice ?? 1);
+  let multiplierRaw = Number(diceSettings.multiplier ?? amount.multiplier ?? 1);
+  multiDiceRaw = multiDiceRaw >= 2 ? 2 : 1;
+  multiplierRaw = multiplierRaw >= 10 ? 10 : 1;
+  // keep deterministic precedence when both are set: multiplier wins.
+  if (multiDiceRaw > 1 && multiplierRaw > 1) multiDiceRaw = 1;
+  return {
+    sides,
+    multiDice: multiDiceRaw as 1 | 2,
+    multiplier: multiplierRaw as 1 | 10,
+  };
+}
+
+function getEffectiveEnvelopeSettings(params: {
+  rules: any;
+  settings: any;
+}): EffectiveEnvelopeSettings {
+  const rootSettings = params.settings ?? {};
+  const envSettings = rootSettings.envelopes ?? {};
+  const cadence = (envSettings.cadence ?? rootSettings.cadence ?? params.rules?.cadence ?? "daily") === "weekly"
+    ? "weekly"
+    : "daily";
+  const order = (envSettings.order ?? rootSettings.order ?? params.rules?.order ?? "random") === "reverse"
+    ? "reverse"
+    : "random";
+  const maxDrawsPerDay = Number(
+    envSettings.maxDrawsPerDay ?? rootSettings.maxDrawsPerDay ?? params.rules?.maxDrawsPerDay ?? 1,
+  ) >= 2
+    ? 2
+    : 1;
+  return { cadence, order, maxDrawsPerDay };
 }
 
 app.get("/auth/me", async (req, reply) => {
@@ -1470,6 +1524,7 @@ app.post("/payments/deposits", async (req, reply) => {
       userId,
       amountCents,
       idempotencyKey,
+      metadata: { source: "funding" },
     });
 
     const userStashId = await getUserStashAccountId(userId);
@@ -2269,6 +2324,10 @@ app.post("/debug/seed/challenges", async () => {
           maxAmountCents: 2000,
           prompt: "Roll to save today",
         },
+        defaultsByTier: {
+          POWER: { settings: { dice: { sides: 12 } } },
+          DEV: { settings: { dice: { sides: 12 } } },
+        },
       },
     },
     {
@@ -2279,6 +2338,10 @@ app.post("/debug/seed/challenges", async () => {
         min: 1,
         max: 100,
         unitAmountCents: 100,
+        defaultsByTier: {
+          POWER: { settings: { envelopes: { maxDrawsPerDay: 2 } } },
+          DEV: { settings: { envelopes: { maxDrawsPerDay: 2 } } },
+        },
       },
     },
     {
@@ -2771,6 +2834,8 @@ async function buildTodayCards(
         maxAmountCents: amount.maxAmountCents ?? 50000,
       });
     } else if (rules.type === "dice") {
+      const settings = (uc?.settings as any) ?? {};
+      const dice = getEffectiveDiceSettings({ rules, settings });
       cards.push({
         type: "dice_daily",
         eventId: ev.id,
@@ -2778,13 +2843,13 @@ async function buildTodayCards(
         userChallengeId: ev.userChallengeId,
         title: uc?.name ?? "Roll the Dice",
         prompt: amount.prompt ?? "Roll to save today",
-        sides: amount.sides ?? 6,
+        sides: dice.sides,
         unitAmountCents: amount.unitAmountCents ?? 100,
         scheduledFor: ev.scheduledFor.toISOString(),
         needsInput: true,
         maxAmountCents: amount.maxAmountCents ?? 2000,
-        ...(amount.multiDice >= 2 && { multiDice: 2 }),
-        ...(amount.multiplier >= 10 && { multiplier: 10 }),
+        multiDice: dice.multiDice,
+        multiplier: dice.multiplier,
       });
     }
   }
@@ -2802,8 +2867,10 @@ async function buildTodayCards(
     const min = Number(rules.min ?? 1);
     const max = Number(rules.max ?? 100);
     const usedCount = state?.used?.length ?? 0;
-    const cadence = rules.cadence ?? "daily";
-    const maxDrawsPerDay = Number(rules.maxDrawsPerDay ?? 1);
+    const settings = (uc.settings as any) ?? {};
+    const envelope = getEffectiveEnvelopeSettings({ rules, settings });
+    const cadence = envelope.cadence;
+    const maxDrawsPerDay = envelope.maxDrawsPerDay;
     let drewToday = false;
     let canDraw = false;
     if (cadence === "weekly") {
@@ -2840,10 +2907,10 @@ async function buildTodayCards(
         min,
         max,
         unitAmountCents: Number(rules.unitAmountCents ?? 100),
-        maxDrawsPerDay: cadence === "weekly" ? 0 : maxDrawsPerDay,
+        maxDrawsPerDay,
         drewToday,
-        ...(cadence === "weekly" && { cadence: "weekly" }),
-        ...(rules.order === "reverse" && { order: "reverse" }),
+        cadence,
+        order: envelope.order,
       });
     }
   }
@@ -3022,7 +3089,13 @@ app.get("/users/:userId/challenges/active", { preHandler: [requireAuth, requireU
 
 async function getActiveChallengesForUser(userId: string): Promise<{
   userId: string;
-  challenges: Array<{ userChallengeId: string; name: string; templateSlug: string | null; progress?: string }>;
+  challenges: Array<{
+    userChallengeId: string;
+    name: string;
+    templateSlug: string | null;
+    progress?: string;
+    settings?: Record<string, unknown>;
+  }>;
 }> {
   const ucs = await prisma.userChallenge.findMany({
     where: { userId, status: "ACTIVE" },
@@ -3032,14 +3105,38 @@ async function getActiveChallengesForUser(userId: string): Promise<{
     const name = uc?.name ?? (uc.template as any)?.name ?? "Challenge";
     const slug = (uc.template as any)?.slug ?? null;
     let progress: string | undefined;
+    let settings: Record<string, unknown> | undefined;
     const rules = (uc.rules as any) ?? {};
     if (rules.type === "envelopes") {
       const state = (uc as any).state as { used?: number[] } | null;
       const used = state?.used?.length ?? 0;
       const total = Number(rules.max ?? 100) - Number(rules.min ?? 1) + 1;
       progress = `${used}/${total}`;
+      const effective = getEffectiveEnvelopeSettings({ rules, settings: (uc.settings as any) ?? {} });
+      settings = {
+        envelopes: {
+          cadence: effective.cadence,
+          order: effective.order,
+          maxDrawsPerDay: effective.maxDrawsPerDay,
+        },
+      };
+    } else if (rules.type === "dice") {
+      const effective = getEffectiveDiceSettings({ rules, settings: (uc.settings as any) ?? {} });
+      settings = {
+        dice: {
+          sides: effective.sides,
+          multiDice: effective.multiDice,
+          multiplier: effective.multiplier,
+        },
+      };
+    } else if (rules.type === "temperature") {
+      const amount = rules.amount ?? {};
+      const st = (uc.settings as any) ?? {};
+      const override = Number(st.scaleOverride);
+      const effectiveScale = override === 1 || override === 10 ? override : Number(amount.scale ?? 1);
+      settings = { scaleOverride: effectiveScale };
     }
-    return { userChallengeId: uc.id, name, templateSlug: slug, progress };
+    return { userChallengeId: uc.id, name, templateSlug: slug, progress, settings };
   });
   return { userId, challenges: list };
 }
@@ -3608,7 +3705,20 @@ app.post("/users/:userId/wallet/provision", { preHandler: [requireAuth, requireU
 });
 
 const UpdateChallengeSettingsSchema = z.object({
-  scaleOverride: z.number().int().optional(),
+  autoCommit: z.boolean().optional(),
+  catchUp: z.boolean().optional(),
+  maxCatchUpEvents: z.number().int().positive().max(365).optional(),
+  scaleOverride: z.union([z.literal(1), z.literal(10)]).optional(),
+  dice: z.object({
+    sides: z.union([z.literal(6), z.literal(12), z.literal(20), z.literal(100)]).optional(),
+    multiDice: z.union([z.literal(1), z.literal(2)]).optional(),
+    multiplier: z.union([z.literal(1), z.literal(10)]).optional(),
+  }).optional(),
+  envelopes: z.object({
+    cadence: z.union([z.literal("daily"), z.literal("weekly")]).optional(),
+    order: z.union([z.literal("random"), z.literal("reverse")]).optional(),
+    maxDrawsPerDay: z.union([z.literal(1), z.literal(2)]).optional(),
+  }).optional(),
 });
 
 app.patch(
@@ -3629,18 +3739,71 @@ app.patch(
       return reply.code(404).send({ error: "Challenge not found" });
 
     const rules = (uc.rules as any) ?? (uc.template as any)?.defaultRules ?? {};
-    const amount = rules.amount ?? {};
-    if (rules.type !== "temperature") {
-      return reply.code(400).send({ error: "Scale override not supported" });
+    const templateSlug = ((uc.template as any)?.slug ?? null) as string | null;
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { tier: true, flags: true },
+    });
+    const cfg = buildUserConfig({
+      tier: (user?.tier as string) ?? "NORMIE",
+      rawFlags: (user?.flags as Record<string, unknown> | null) ?? null,
+    });
+
+    const nextSettings = { ...((uc.settings as any) ?? {}) };
+    if (parsed.data.autoCommit !== undefined) nextSettings.autoCommit = parsed.data.autoCommit;
+    if (parsed.data.catchUp !== undefined) nextSettings.catchUp = parsed.data.catchUp;
+    if (parsed.data.maxCatchUpEvents !== undefined) nextSettings.maxCatchUpEvents = parsed.data.maxCatchUpEvents;
+
+    if (parsed.data.scaleOverride !== undefined) {
+      if (rules.type !== "temperature") {
+        return reply.code(400).send({ error: "scaleOverride not supported" });
+      }
+      nextSettings.scaleOverride = parsed.data.scaleOverride;
     }
 
-    const nextSettings = { ...(uc.settings as any) };
-    if (parsed.data.scaleOverride !== undefined) {
-      const v = parsed.data.scaleOverride;
-      if (v !== 1 && v !== 10) {
-        return reply.code(400).send({ error: "scaleOverride must be 1 or 10" });
+    if (parsed.data.dice) {
+      if (rules.type !== "dice") return reply.code(400).send({ error: "dice settings not supported" });
+      const d = parsed.data.dice;
+      const nextDice = { ...(nextSettings.dice ?? {}) } as any;
+      if (d.sides !== undefined && d.sides !== 6 && !cfg.actions.canDiceChooseSides) {
+        return reply.code(403).send({ error: "forbidden" });
       }
-      nextSettings.scaleOverride = v;
+      if (d.multiDice !== undefined && d.multiDice === 2 && !cfg.actions.canDiceTwoDice) {
+        return reply.code(403).send({ error: "forbidden" });
+      }
+      if (d.multiplier !== undefined && d.multiplier === 10 && !cfg.actions.canDiceMultiplier10) {
+        return reply.code(403).send({ error: "forbidden" });
+      }
+      if (d.sides !== undefined) nextDice.sides = d.sides;
+      if (d.multiDice !== undefined) nextDice.multiDice = d.multiDice;
+      if (d.multiplier !== undefined) nextDice.multiplier = d.multiplier;
+      const effectiveMulti = Number(nextDice.multiDice ?? 1);
+      const effectiveMult = Number(nextDice.multiplier ?? 1);
+      if (effectiveMulti === 2 && effectiveMult === 10) {
+        return reply.code(400).send({ error: "invalid_settings" });
+      }
+      nextSettings.dice = nextDice;
+    }
+
+    if (parsed.data.envelopes) {
+      if (!(templateSlug === "100_envelopes" || rules.type === "envelopes")) {
+        return reply.code(400).send({ error: "envelopes settings not supported" });
+      }
+      const e = parsed.data.envelopes;
+      const nextEnv = { ...(nextSettings.envelopes ?? {}) } as any;
+      if (e.maxDrawsPerDay !== undefined && e.maxDrawsPerDay === 2 && !cfg.actions.canEnvelopesTwoPerDay) {
+        return reply.code(403).send({ error: "forbidden" });
+      }
+      if (e.cadence !== undefined && e.cadence === "weekly" && !cfg.actions.canEnvelopesWeeklyCadence) {
+        return reply.code(403).send({ error: "forbidden" });
+      }
+      if (e.order !== undefined && e.order === "reverse" && !cfg.actions.canEnvelopesReverseOrder) {
+        return reply.code(403).send({ error: "forbidden" });
+      }
+      if (e.cadence !== undefined) nextEnv.cadence = e.cadence;
+      if (e.order !== undefined) nextEnv.order = e.order;
+      if (e.maxDrawsPerDay !== undefined) nextEnv.maxDrawsPerDay = e.maxDrawsPerDay;
+      nextSettings.envelopes = nextEnv;
     }
 
     const updated = await prisma.userChallenge.update({
@@ -3648,15 +3811,12 @@ app.patch(
       data: { settings: nextSettings },
     });
 
-    const override = Number((updated.settings as any)?.scaleOverride);
-    const effectiveScale =
-      override === 1 || override === 10 ? override : Number(amount.scale ?? 1);
-
     return reply.send({
-      ok: true,
       userChallengeId: updated.id,
+      userId,
+      templateSlug,
       settings: updated.settings,
-      effectiveScale,
+      updatedAt: new Date().toISOString(),
     });
   },
 );
@@ -3739,6 +3899,8 @@ app.post("/challenges/start", { preHandler: [requireAuth] }, async (req, reply) 
   const schedule = rules.schedule ?? {};
   const catchUpDefault = schedule.catchUp ?? true;
   const maxCatchUpEventsDefault = schedule.maxCatchUpEvents ?? 30;
+  const defaultsByTier = (rules.defaultsByTier as Record<string, any> | undefined) ?? {};
+  const tierDefaults = defaultsByTier[tier]?.settings ?? {};
   let nextRunAt: Date | null = null;
   let state: any = null;
 
@@ -3768,6 +3930,7 @@ app.post("/challenges/start", { preHandler: [requireAuth] }, async (req, reply) 
     autoCommit: autoCommitDefault,
     catchUp: catchUpDefault,
     maxCatchUpEvents: maxCatchUpEventsDefault,
+    ...tierDefaults,
     ...settingsOverride,
   };
 
@@ -4459,8 +4622,9 @@ app.post("/challenges/:id/draw", { preHandler: [requireAuth] }, async (req, repl
   }
 
   const now = new Date();
-  const cadence = rules.cadence ?? "daily";
-  const maxDrawsPerDay = Number(rules.maxDrawsPerDay ?? settings.maxDrawsPerDay ?? 1);
+  const envelope = getEffectiveEnvelopeSettings({ rules, settings });
+  const cadence = envelope.cadence;
+  const maxDrawsPerDay = envelope.maxDrawsPerDay;
 
   if (cadence === "weekly") {
     const weekStart = startOfWeekUtc(now);
@@ -4913,6 +5077,12 @@ app.post("/challenges/:challengeId/events/:eventId/set-temperature", { preHandle
   }
 });
 
+const RollDiceInputSchema = z.object({
+  sides: z.union([z.literal(6), z.literal(12), z.literal(20), z.literal(100)]).optional(),
+  multiDice: z.union([z.literal(1), z.literal(2)]).optional(),
+  multiplier: z.union([z.literal(1), z.literal(10)]).optional(),
+});
+
 app.post("/challenges/:challengeId/events/:eventId/roll", { preHandler: [requireAuth] }, async (req, reply) => {
   const { challengeId, eventId } = req.params as any;
 
@@ -4940,11 +5110,18 @@ app.post("/challenges/:challengeId/events/:eventId/roll", { preHandler: [require
       return reply.send({ status: "already_committed", paymentIntentId: ce.paymentIntentId });
     }
 
+    const bodyParsed = RollDiceInputSchema.safeParse((req.body as any) ?? {});
+    if (!bodyParsed.success) {
+      return reply.code(400).send({ error: bodyParsed.error.flatten() });
+    }
+    const body = bodyParsed.data;
+
     const amountRules = rules.amount ?? {};
-    const sides = Number(amountRules.sides ?? rules.sides ?? 6);
+    const effective = getEffectiveDiceSettings({ rules, settings: (uc?.settings as any) ?? {} });
+    const sides = Number(body.sides ?? effective.sides);
     const unitAmountCents = Number(amountRules.unitAmountCents ?? rules.unitAmountCents ?? 100);
-    const multiDice = Number(amountRules.multiDice ?? 1);
-    const multiplier = Number(amountRules.multiplier ?? 1);
+    const multiDice = Number(body.multiDice ?? effective.multiDice);
+    const multiplier = Number(body.multiplier ?? effective.multiplier);
     if (!Number.isFinite(sides) || sides <= 1) {
       return reply.code(400).send({ error: "Invalid sides" });
     }
@@ -4956,30 +5133,31 @@ app.post("/challenges/:challengeId/events/:eventId/roll", { preHandler: [require
       where: { id: uc!.userId },
       select: { tier: true, flags: true },
     });
-    const tier = (user?.tier as string) ?? "NORMIE";
-    const isPowerOrDev = tier === "POWER" || tier === "DEV";
+    const cfg = buildUserConfig({
+      tier: (user?.tier as string) ?? "NORMIE",
+      rawFlags: (user?.flags as Record<string, unknown> | null) ?? null,
+    });
 
-    const allowedSides = isPowerOrDev ? [6, 12, 20, 100] : [6];
-    if (!allowedSides.includes(sides)) {
-      return reply.code(400).send({ error: "This dice type is only available on POWER tier" });
+    if (sides !== 6 && !cfg.actions.canDiceChooseSides) {
+      return reply.code(403).send({ error: "forbidden" });
     }
     if (multiDice > 1 && multiplier > 1) {
       return reply.code(400).send({ error: "Cannot use multi-dice and multiplier together" });
     }
-    if (multiDice > 1 && !isPowerOrDev) {
-      return reply.code(400).send({ error: "Multi-dice is only available on POWER tier" });
+    if (multiDice > 1 && !cfg.actions.canDiceTwoDice) {
+      return reply.code(403).send({ error: "forbidden" });
     }
-    if (multiplier > 1 && !isPowerOrDev) {
-      return reply.code(400).send({ error: "Dice multiplier is only available on POWER tier" });
+    if (multiplier > 1 && !cfg.actions.canDiceMultiplier10) {
+      return reply.code(403).send({ error: "forbidden" });
     }
 
     const rawFlags = (user?.flags as any) ?? {};
     const tierMax =
       typeof rawFlags.maxSingleDiceSaveCents === "number"
         ? rawFlags.maxSingleDiceSaveCents
-        : tier === "DEV"
+        : cfg.tier === "DEV"
           ? 50_000
-          : tier === "POWER"
+          : cfg.tier === "POWER"
             ? 20_000
             : 5_000;
 

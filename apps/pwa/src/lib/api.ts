@@ -193,8 +193,13 @@ export type TodayCard =
       unitAmountCents: number;
       maxDrawsPerDay?: number;
       drewToday?: boolean;
+      cadence?: "daily" | "weekly";
+      order?: "random" | "reverse";
     }
   | { type: string; [k: string]: any };
+
+export type DiceTodayCard = Extract<TodayCard, { type: "dice_daily" }>;
+export type EnvelopesTodayCard = Extract<TodayCard, { type: "envelopes_100" }>;
 
 export type TodayBanner =
   | {
@@ -257,6 +262,31 @@ export type UserConfigResponse = {
   flags: Record<string, unknown>;
   actions: FeatureActions;
   limits: TierLimits;
+};
+
+export type PatchUserChallengeSettingsBody = {
+  autoCommit?: boolean;
+  catchUp?: boolean;
+  maxCatchUpEvents?: number;
+  scaleOverride?: 1 | 10;
+  dice?: {
+    sides?: 6 | 12 | 20 | 100;
+    multiDice?: 1 | 2;
+    multiplier?: 1 | 10;
+  };
+  envelopes?: {
+    cadence?: "daily" | "weekly";
+    order?: "random" | "reverse";
+    maxDrawsPerDay?: 1 | 2;
+  };
+};
+
+export type PatchUserChallengeSettingsResponse = {
+  userChallengeId: string;
+  userId: string;
+  templateSlug: string | null;
+  settings: Record<string, unknown>;
+  updatedAt: string;
 };
 
 export type AuthMe = {
@@ -418,6 +448,7 @@ export const api = {
         name: string;
         templateSlug: string | null;
         progress?: string;
+        settings?: Record<string, unknown>;
       }>;
     }>(
       "GET",
@@ -445,6 +476,7 @@ export const api = {
         name: string;
         templateSlug: string | null;
         progress?: string;
+        settings?: Record<string, unknown>;
       }>;
     }>("GET", `/users/${userId}/challenges/active`),
 
@@ -476,16 +508,20 @@ export const api = {
   updateChallengeSettings: (
     userId: string,
     userChallengeId: string,
-    body: { scaleOverride?: number },
+    body: PatchUserChallengeSettingsBody,
   ) =>
-    req<any>(
+    req<PatchUserChallengeSettingsResponse>(
       "PATCH",
       `/users/${userId}/challenges/${userChallengeId}/settings`,
       body,
     ),
 
-  rollDiceEvent: (challengeId: string, eventId: string) =>
-    req<any>("POST", `/challenges/${challengeId}/events/${eventId}/roll`, {}),
+  rollDiceEvent: (
+    challengeId: string,
+    eventId: string,
+    body?: { sides?: 6 | 12 | 20 | 100; multiDice?: 1 | 2; multiplier?: 1 | 10 },
+  ) =>
+    req<any>("POST", `/challenges/${challengeId}/events/${eventId}/roll`, body ?? {}),
 
   commitPending: (userId: string, limit = 200) =>
     req<any>("POST", `/users/${userId}/challenges/commit-pending?limit=${limit}`, {}),

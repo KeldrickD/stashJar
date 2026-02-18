@@ -505,7 +505,7 @@ export default function Home() {
               {actions.canDiceChooseSides && (
                 <span className="text-xs font-medium text-violet-600 mb-1 inline-block">POWER</span>
               )}
-              <TodayCardRenderer userId={userId} card={card} onDone={refreshEverything} />
+              <TodayCardRenderer userId={userId} card={card} actions={actions} onDone={refreshEverything} />
             </div>
           );
         })}

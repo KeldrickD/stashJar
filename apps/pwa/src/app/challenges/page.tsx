@@ -2,8 +2,24 @@
 
 import { useEffect, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { api } from "@/lib/api";
-import { getUserId, setUserId as saveUserId } from "@/lib/session";
+import { api, type FeatureActions } from "@/lib/api";
+import { setUserId as saveUserId } from "@/lib/session";
+
+const DEFAULT_ACTIONS: FeatureActions = {
+  canFund: false,
+  canWithdrawToWallet: false,
+  canWithdrawToBank: false,
+  canDiceTwoDice: false,
+  canDiceMultiplier10: false,
+  canDiceChooseSides: false,
+  canEnvelopesTwoPerDay: false,
+  canEnvelopesWeeklyCadence: false,
+  canEnvelopesReverseOrder: false,
+  canStreakShield: false,
+  canMakeupSave: false,
+  canPushReminders: false,
+  canWeeklyRecapEmail: false,
+};
 
 export default function ChallengesPage() {
   const router = useRouter();
@@ -11,8 +27,25 @@ export default function ChallengesPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [status, setStatus] = useState("");
   const [activeChallengeId, setActiveChallengeId] = useState<string>("");
+  const [activeChallenges, setActiveChallenges] = useState<Array<{
+    userChallengeId: string;
+    name: string;
+    templateSlug: string | null;
+    progress?: string;
+    settings?: Record<string, unknown>;
+  }>>([]);
+  const [actions, setActions] = useState<FeatureActions>(DEFAULT_ACTIONS);
   const [loadingUser, setLoadingUser] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  async function refreshContext(uid: string) {
+    const [active, config] = await Promise.all([
+      api.getActiveChallenges(uid),
+      api.getConfig(uid),
+    ]);
+    setActiveChallenges(active.challenges ?? []);
+    setActions((config.actions as FeatureActions) ?? DEFAULT_ACTIONS);
+  }
 
   useEffect(() => {
     (async () => {
@@ -22,6 +55,7 @@ export default function ChallengesPage() {
         const uid = me.userId;
         saveUserId(uid);
         setUserId(uid);
+        await refreshContext(uid);
         setError(null);
       } catch (e: any) {
         if (e?.message === "unauthorized") {
@@ -47,6 +81,7 @@ export default function ChallengesPage() {
       });
       setActiveChallengeId(res.userChallengeId);
       setStatus(`Started: ${res.userChallengeId}`);
+      await refreshContext(userId);
       if (res.primedEventId) {
         localStorage.setItem("focusEventId", res.primedEventId);
       }
@@ -61,6 +96,7 @@ export default function ChallengesPage() {
     try {
       setStatus("Running due challenges…");
       await api.runDueChallenges(userId);
+      await refreshContext(userId);
       setStatus("Done.");
     } catch (e: any) {
       setStatus(`Error: ${e?.message ?? "Failed to run due challenges"}`);
@@ -88,6 +124,20 @@ export default function ChallengesPage() {
       setStatus(`Rolled: ${r.roll ?? "?"} (+$${(r.amountCents / 100).toFixed(2)})`);
     } catch (e: any) {
       setStatus(`Error: ${e?.message ?? "Failed to roll dice"}`);
+    }
+  }
+
+  async function patchSettings(
+    userChallengeId: string,
+    body: Parameters<typeof api.updateChallengeSettings>[2],
+  ) {
+    if (!userId) return;
+    try {
+      await api.updateChallengeSettings(userId, userChallengeId, body);
+      await refreshContext(userId);
+      setStatus("Settings saved ✅");
+    } catch (e: any) {
+      setStatus(`Error: ${e?.message ?? "Failed to save settings"}`);
     }
   }
 
@@ -165,6 +215,194 @@ export default function ChallengesPage() {
         </div>
         <div className="text-sm opacity-70 break-words">{status}</div>
         <div className="text-xs opacity-60">Active challenge: {activeChallengeId || "none"}</div>
+      </section>
+
+      <section className="rounded-xl border p-5 space-y-4">
+        <h2 className="font-semibold">Challenge Settings</h2>
+        {activeChallenges.length === 0 && (
+          <p className="text-sm opacity-70">No active challenges yet.</p>
+        )}
+        {activeChallenges.map((ch) => {
+          const s = (ch.settings ?? {}) as any;
+          const dice = (s.dice ?? {}) as {
+            sides?: 6 | 12 | 20 | 100;
+            multiDice?: 1 | 2;
+            multiplier?: 1 | 10;
+          };
+          const envelopes = (s.envelopes ?? {}) as {
+            cadence?: "daily" | "weekly";
+            order?: "random" | "reverse";
+            maxDrawsPerDay?: 1 | 2;
+          };
+          return (
+            <div key={ch.userChallengeId} className="rounded border p-3 space-y-2">
+              <div className="text-sm font-medium">
+                {ch.name} {ch.progress ? <span className="opacity-70">({ch.progress})</span> : null}
+              </div>
+
+              {(ch.templateSlug === "dice_daily" || ch.templateSlug === "dice") && (
+                <div className="space-y-2">
+                  <div className="text-xs opacity-70">Dice defaults</div>
+                  <div className="flex flex-wrap gap-2">
+                    {(actions.canDiceChooseSides ? [6, 12, 20, 100] : [6]).map((side) => (
+                      <button
+                        key={side}
+                        className={`rounded border px-3 py-1 text-xs ${(dice.sides ?? 6) === side ? "bg-black text-white" : ""}`}
+                        onClick={() =>
+                          patchSettings(ch.userChallengeId, {
+                            dice: {
+                              sides: side as 6 | 12 | 20 | 100,
+                              multiDice: (dice.multiDice ?? 1) as 1 | 2,
+                              multiplier: (dice.multiplier ?? 1) as 1 | 10,
+                            },
+                          })
+                        }
+                      >
+                        D{side}
+                      </button>
+                    ))}
+                    {actions.canDiceTwoDice && (
+                      <button
+                        className={`rounded border px-3 py-1 text-xs ${(dice.multiDice ?? 1) === 2 ? "bg-black text-white" : ""}`}
+                        onClick={() =>
+                          patchSettings(ch.userChallengeId, {
+                            dice: {
+                              sides: (dice.sides ?? 6) as 6 | 12 | 20 | 100,
+                              multiDice: (dice.multiDice ?? 1) === 2 ? 1 : 2,
+                              multiplier: (dice.multiDice ?? 1) === 2 ? (dice.multiplier ?? 1) : 1,
+                            },
+                          })
+                        }
+                      >
+                        2 dice
+                      </button>
+                    )}
+                    {actions.canDiceMultiplier10 && (
+                      <button
+                        className={`rounded border px-3 py-1 text-xs ${(dice.multiplier ?? 1) === 10 ? "bg-black text-white" : ""}`}
+                        onClick={() =>
+                          patchSettings(ch.userChallengeId, {
+                            dice: {
+                              sides: (dice.sides ?? 6) as 6 | 12 | 20 | 100,
+                              multiDice: (dice.multiplier ?? 1) === 10 ? (dice.multiDice ?? 1) : 1,
+                              multiplier: (dice.multiplier ?? 1) === 10 ? 1 : 10,
+                            },
+                          })
+                        }
+                      >
+                        ×10
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {ch.templateSlug === "100_envelopes" && (
+                <div className="space-y-2">
+                  <div className="text-xs opacity-70">Envelope defaults</div>
+                  <div className="flex flex-wrap gap-2">
+                    {actions.canEnvelopesWeeklyCadence && (
+                      <>
+                        <button
+                          className={`rounded border px-3 py-1 text-xs ${(envelopes.cadence ?? "daily") === "daily" ? "bg-black text-white" : ""}`}
+                          onClick={() =>
+                            patchSettings(ch.userChallengeId, {
+                              envelopes: {
+                                cadence: "daily",
+                                order: (envelopes.order ?? "random") as "random" | "reverse",
+                                maxDrawsPerDay: (envelopes.maxDrawsPerDay ?? 1) as 1 | 2,
+                              },
+                            })
+                          }
+                        >
+                          Daily
+                        </button>
+                        <button
+                          className={`rounded border px-3 py-1 text-xs ${(envelopes.cadence ?? "daily") === "weekly" ? "bg-black text-white" : ""}`}
+                          onClick={() =>
+                            patchSettings(ch.userChallengeId, {
+                              envelopes: {
+                                cadence: "weekly",
+                                order: (envelopes.order ?? "random") as "random" | "reverse",
+                                maxDrawsPerDay: (envelopes.maxDrawsPerDay ?? 1) as 1 | 2,
+                              },
+                            })
+                          }
+                        >
+                          Weekly
+                        </button>
+                      </>
+                    )}
+                    {actions.canEnvelopesReverseOrder && (
+                      <>
+                        <button
+                          className={`rounded border px-3 py-1 text-xs ${(envelopes.order ?? "random") === "random" ? "bg-black text-white" : ""}`}
+                          onClick={() =>
+                            patchSettings(ch.userChallengeId, {
+                              envelopes: {
+                                cadence: (envelopes.cadence ?? "daily") as "daily" | "weekly",
+                                order: "random",
+                                maxDrawsPerDay: (envelopes.maxDrawsPerDay ?? 1) as 1 | 2,
+                              },
+                            })
+                          }
+                        >
+                          Random
+                        </button>
+                        <button
+                          className={`rounded border px-3 py-1 text-xs ${(envelopes.order ?? "random") === "reverse" ? "bg-black text-white" : ""}`}
+                          onClick={() =>
+                            patchSettings(ch.userChallengeId, {
+                              envelopes: {
+                                cadence: (envelopes.cadence ?? "daily") as "daily" | "weekly",
+                                order: "reverse",
+                                maxDrawsPerDay: (envelopes.maxDrawsPerDay ?? 1) as 1 | 2,
+                              },
+                            })
+                          }
+                        >
+                          Reverse
+                        </button>
+                      </>
+                    )}
+                    {actions.canEnvelopesTwoPerDay && (
+                      <>
+                        <button
+                          className={`rounded border px-3 py-1 text-xs ${(envelopes.maxDrawsPerDay ?? 1) === 1 ? "bg-black text-white" : ""}`}
+                          onClick={() =>
+                            patchSettings(ch.userChallengeId, {
+                              envelopes: {
+                                cadence: (envelopes.cadence ?? "daily") as "daily" | "weekly",
+                                order: (envelopes.order ?? "random") as "random" | "reverse",
+                                maxDrawsPerDay: 1,
+                              },
+                            })
+                          }
+                        >
+                          1/day
+                        </button>
+                        <button
+                          className={`rounded border px-3 py-1 text-xs ${(envelopes.maxDrawsPerDay ?? 1) === 2 ? "bg-black text-white" : ""}`}
+                          onClick={() =>
+                            patchSettings(ch.userChallengeId, {
+                              envelopes: {
+                                cadence: (envelopes.cadence ?? "daily") as "daily" | "weekly",
+                                order: (envelopes.order ?? "random") as "random" | "reverse",
+                                maxDrawsPerDay: 2,
+                              },
+                            })
+                          }
+                        >
+                          2/day
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </section>
     </main>
   );

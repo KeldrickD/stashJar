@@ -246,10 +246,12 @@ export function FundingCta({
         <p className="text-xs opacity-70">Daily add limit: ${(maxCreditsPerDayCents / 100).toFixed(0)}</p>
       )}
       <p className="text-xs opacity-70">
-        {helperText ??
-          "Add money via Coinbase → tap "}
-        {!helperText && <strong>Refresh</strong>}
-        {!helperText && " if your balance doesn’t update in ~30s."}
+        {helperText
+          ?? (uiMode === "open_in_wallet" && !deeplink
+            ? "Open your wallet app to add funds, then return here and refresh."
+            : "Add money via Coinbase → tap ")}
+        {!helperText && !(uiMode === "open_in_wallet" && !deeplink) && <strong>Refresh</strong>}
+        {!helperText && !(uiMode === "open_in_wallet" && !deeplink) && " if your balance doesn’t update in ~30s."}
       </p>
     </section>
   );

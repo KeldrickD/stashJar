@@ -4,24 +4,25 @@ import { WeatherWednesdayCard } from "@/components/WeatherWednesdayCard";
 import { TemperatureCard } from "@/components/TemperatureCard";
 import { DiceCard } from "@/components/DiceCard";
 import { EnvelopesCard } from "@/components/EnvelopesCard";
-import type { TodayCard } from "@/lib/api";
+import type { FeatureActions, TodayCard } from "@/lib/api";
 
 type Props = {
   userId: string;
   card: TodayCard;
-  onDone: () => void;
+  actions: FeatureActions;
+  onDone: () => void | Promise<void>;
 };
 
-export function TodayCardRenderer({ userId, card, onDone }: Props) {
+export function TodayCardRenderer({ userId, card, actions, onDone }: Props) {
   switch (card.type) {
     case "weather_wednesday":
       return <WeatherWednesdayCard userId={userId} card={card as any} onDone={onDone} />;
     case "temperature_daily":
       return <TemperatureCard userId={userId} card={card as any} onDone={onDone} />;
     case "dice_daily":
-      return <DiceCard userId={userId} card={card as any} onDone={onDone} />;
+      return <DiceCard userId={userId} card={card as any} actions={actions} onDone={onDone} />;
     case "envelopes_100":
-      return <EnvelopesCard userId={userId} card={card as any} onDone={onDone} />;
+      return <EnvelopesCard userId={userId} card={card as any} actions={actions} onDone={onDone} />;
     default:
       return (
         <section className="rounded-xl border p-5 space-y-2">
