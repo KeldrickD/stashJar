@@ -24,6 +24,15 @@ export function ApplyMissedSavesBanner({ userId, banner, onDone }: Props) {
     );
   }
 
+  if (banner.type === "waiting_for_funds") {
+    return (
+      <section className="rounded-xl border p-5 space-y-2">
+        <div className="text-lg font-semibold">Waiting for funds</div>
+        <div className="text-sm opacity-70">{banner.message}</div>
+      </section>
+    );
+  }
+
   if (banner.type !== "commit_pending") return null;
 
   async function applyNow() {

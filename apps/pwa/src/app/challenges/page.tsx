@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { api, type FeatureActions } from "@/lib/api";
+import { api, type ChallengeLimits, type FeatureActions } from "@/lib/api";
 import { setUserId as saveUserId } from "@/lib/session";
 
 const DEFAULT_ACTIONS: FeatureActions = {
   canFund: false,
+  preferredFundingRail: "MANUAL_REFRESH_ONLY",
   canWithdrawToWallet: false,
   canWithdrawToBank: false,
   canDiceTwoDice: false,
@@ -21,6 +22,21 @@ const DEFAULT_ACTIONS: FeatureActions = {
   canWeeklyRecapEmail: false,
 };
 
+const DEFAULT_CHALLENGE_LIMITS: ChallengeLimits = {
+  dice: {
+    allowedSides: [6],
+    allowedMultiDice: [1],
+    allowedMultipliers: [1],
+    maxSides: 100,
+  },
+  envelopes100: {
+    allowedCadence: ["daily"],
+    allowedOrder: ["random"],
+    maxDrawsPerDayMax: 1,
+    maxDrawsPerWeekMax: 7,
+  },
+};
+
 export default function ChallengesPage() {
   const router = useRouter();
   const pathname = usePathname();
@@ -33,8 +49,12 @@ export default function ChallengesPage() {
     templateSlug: string | null;
     progress?: string;
     settings?: Record<string, unknown>;
+    bounds?: { dice?: ChallengeLimits["dice"]; envelopes100?: ChallengeLimits["envelopes100"] };
   }>>([]);
   const [actions, setActions] = useState<FeatureActions>(DEFAULT_ACTIONS);
+  const [limits, setLimits] = useState<{ challenges: ChallengeLimits }>({
+    challenges: DEFAULT_CHALLENGE_LIMITS,
+  });
   const [loadingUser, setLoadingUser] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,6 +65,9 @@ export default function ChallengesPage() {
     ]);
     setActiveChallenges(active.challenges ?? []);
     setActions((config.actions as FeatureActions) ?? DEFAULT_ACTIONS);
+    setLimits({
+      challenges: (config.limits as { challenges: ChallengeLimits })?.challenges ?? DEFAULT_CHALLENGE_LIMITS,
+    });
   }
 
   useEffect(() => {
@@ -240,69 +263,80 @@ export default function ChallengesPage() {
                 {ch.name} {ch.progress ? <span className="opacity-70">({ch.progress})</span> : null}
               </div>
 
-              {(ch.templateSlug === "dice_daily" || ch.templateSlug === "dice") && (
-                <div className="space-y-2">
-                  <div className="text-xs opacity-70">Dice defaults</div>
-                  <div className="flex flex-wrap gap-2">
-                    {(actions.canDiceChooseSides ? [6, 12, 20, 100] : [6]).map((side) => (
-                      <button
-                        key={side}
-                        className={`rounded border px-3 py-1 text-xs ${(dice.sides ?? 6) === side ? "bg-black text-white" : ""}`}
-                        onClick={() =>
-                          patchSettings(ch.userChallengeId, {
-                            dice: {
-                              sides: side as 6 | 12 | 20 | 100,
-                              multiDice: (dice.multiDice ?? 1) as 1 | 2,
-                              multiplier: (dice.multiplier ?? 1) as 1 | 10,
-                            },
-                          })
-                        }
-                      >
-                        D{side}
-                      </button>
-                    ))}
-                    {actions.canDiceTwoDice && (
-                      <button
-                        className={`rounded border px-3 py-1 text-xs ${(dice.multiDice ?? 1) === 2 ? "bg-black text-white" : ""}`}
-                        onClick={() =>
-                          patchSettings(ch.userChallengeId, {
-                            dice: {
-                              sides: (dice.sides ?? 6) as 6 | 12 | 20 | 100,
-                              multiDice: (dice.multiDice ?? 1) === 2 ? 1 : 2,
-                              multiplier: (dice.multiDice ?? 1) === 2 ? (dice.multiplier ?? 1) : 1,
-                            },
-                          })
-                        }
-                      >
-                        2 dice
-                      </button>
-                    )}
-                    {actions.canDiceMultiplier10 && (
-                      <button
-                        className={`rounded border px-3 py-1 text-xs ${(dice.multiplier ?? 1) === 10 ? "bg-black text-white" : ""}`}
-                        onClick={() =>
-                          patchSettings(ch.userChallengeId, {
-                            dice: {
-                              sides: (dice.sides ?? 6) as 6 | 12 | 20 | 100,
-                              multiDice: (dice.multiplier ?? 1) === 10 ? (dice.multiDice ?? 1) : 1,
-                              multiplier: (dice.multiplier ?? 1) === 10 ? 1 : 10,
-                            },
-                          })
-                        }
-                      >
-                        ×10
-                      </button>
-                    )}
+              {(ch.templateSlug === "dice_daily" || ch.templateSlug === "dice") && (() => {
+                const dl = ch.bounds?.dice ?? limits.challenges.dice;
+                const allowedSides = dl.allowedSides.length > 0 ? dl.allowedSides : [6];
+                const canTwoDice = dl.allowedMultiDice.includes(2);
+                const canMultiplier10 = dl.allowedMultipliers.includes(10);
+                return (
+                  <div className="space-y-2">
+                    <div className="text-xs opacity-70">Dice defaults</div>
+                    <div className="flex flex-wrap gap-2">
+                      {allowedSides.map((side) => (
+                        <button
+                          key={side}
+                          className={`rounded border px-3 py-1 text-xs ${(dice.sides ?? 6) === side ? "bg-black text-white" : ""}`}
+                          onClick={() =>
+                            patchSettings(ch.userChallengeId, {
+                              dice: {
+                                sides: side as 6 | 12 | 20 | 100,
+                                multiDice: (dice.multiDice ?? 1) as 1 | 2,
+                                multiplier: (dice.multiplier ?? 1) as 1 | 10,
+                              },
+                            })
+                          }
+                        >
+                          D{side}
+                        </button>
+                      ))}
+                      {canTwoDice && (
+                        <button
+                          className={`rounded border px-3 py-1 text-xs ${(dice.multiDice ?? 1) === 2 ? "bg-black text-white" : ""}`}
+                          onClick={() =>
+                            patchSettings(ch.userChallengeId, {
+                              dice: {
+                                sides: (dice.sides ?? 6) as 6 | 12 | 20 | 100,
+                                multiDice: (dice.multiDice ?? 1) === 2 ? 1 : 2,
+                                multiplier: (dice.multiDice ?? 1) === 2 ? (dice.multiplier ?? 1) : 1,
+                              },
+                            })
+                          }
+                        >
+                          2 dice
+                        </button>
+                      )}
+                      {canMultiplier10 && (
+                        <button
+                          className={`rounded border px-3 py-1 text-xs ${(dice.multiplier ?? 1) === 10 ? "bg-black text-white" : ""}`}
+                          onClick={() =>
+                            patchSettings(ch.userChallengeId, {
+                              dice: {
+                                sides: (dice.sides ?? 6) as 6 | 12 | 20 | 100,
+                                multiDice: (dice.multiplier ?? 1) === 10 ? (dice.multiDice ?? 1) : 1,
+                                multiplier: (dice.multiplier ?? 1) === 10 ? 1 : 10,
+                              },
+                            })
+                          }
+                        >
+                          ×10
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
-              {ch.templateSlug === "100_envelopes" && (
-                <div className="space-y-2">
-                  <div className="text-xs opacity-70">Envelope defaults</div>
-                  <div className="flex flex-wrap gap-2">
-                    {actions.canEnvelopesWeeklyCadence && (
-                      <>
+              {ch.templateSlug === "100_envelopes" && (() => {
+                const el = ch.bounds?.envelopes100 ?? limits.challenges.envelopes100;
+                const allowedCadence = el.allowedCadence.length > 0 ? el.allowedCadence : (["daily"] as const);
+                const allowedOrder = el.allowedOrder.length > 0 ? el.allowedOrder : (["random"] as const);
+                const maxDrawsMax = Math.max(1, el.maxDrawsPerDayMax ?? 1);
+                const drawOptions = Array.from({ length: maxDrawsMax }, (_, i) => (i + 1) as 1 | 2);
+                return (
+                  <div className="space-y-2">
+                    <div className="text-xs opacity-70">Envelope defaults</div>
+                    <div className="flex flex-wrap gap-2">
+                      {allowedCadence.includes("daily") && (
                         <button
                           className={`rounded border px-3 py-1 text-xs ${(envelopes.cadence ?? "daily") === "daily" ? "bg-black text-white" : ""}`}
                           onClick={() =>
@@ -310,13 +344,15 @@ export default function ChallengesPage() {
                               envelopes: {
                                 cadence: "daily",
                                 order: (envelopes.order ?? "random") as "random" | "reverse",
-                                maxDrawsPerDay: (envelopes.maxDrawsPerDay ?? 1) as 1 | 2,
+                                maxDrawsPerDay: Math.min((envelopes.maxDrawsPerDay ?? 1) as number, maxDrawsMax) as 1 | 2,
                               },
                             })
                           }
                         >
                           Daily
                         </button>
+                      )}
+                      {allowedCadence.includes("weekly") && (
                         <button
                           className={`rounded border px-3 py-1 text-xs ${(envelopes.cadence ?? "daily") === "weekly" ? "bg-black text-white" : ""}`}
                           onClick={() =>
@@ -324,17 +360,15 @@ export default function ChallengesPage() {
                               envelopes: {
                                 cadence: "weekly",
                                 order: (envelopes.order ?? "random") as "random" | "reverse",
-                                maxDrawsPerDay: (envelopes.maxDrawsPerDay ?? 1) as 1 | 2,
+                                maxDrawsPerDay: Math.min((envelopes.maxDrawsPerDay ?? 1) as number, maxDrawsMax) as 1 | 2,
                               },
                             })
                           }
                         >
                           Weekly
                         </button>
-                      </>
-                    )}
-                    {actions.canEnvelopesReverseOrder && (
-                      <>
+                      )}
+                      {allowedOrder.includes("random") && (
                         <button
                           className={`rounded border px-3 py-1 text-xs ${(envelopes.order ?? "random") === "random" ? "bg-black text-white" : ""}`}
                           onClick={() =>
@@ -349,6 +383,8 @@ export default function ChallengesPage() {
                         >
                           Random
                         </button>
+                      )}
+                      {allowedOrder.includes("reverse") && (
                         <button
                           className={`rounded border px-3 py-1 text-xs ${(envelopes.order ?? "random") === "reverse" ? "bg-black text-white" : ""}`}
                           onClick={() =>
@@ -363,43 +399,28 @@ export default function ChallengesPage() {
                         >
                           Reverse
                         </button>
-                      </>
-                    )}
-                    {actions.canEnvelopesTwoPerDay && (
-                      <>
+                      )}
+                      {drawOptions.map((n) => (
                         <button
-                          className={`rounded border px-3 py-1 text-xs ${(envelopes.maxDrawsPerDay ?? 1) === 1 ? "bg-black text-white" : ""}`}
+                          key={n}
+                          className={`rounded border px-3 py-1 text-xs ${(envelopes.maxDrawsPerDay ?? 1) === n ? "bg-black text-white" : ""}`}
                           onClick={() =>
                             patchSettings(ch.userChallengeId, {
                               envelopes: {
                                 cadence: (envelopes.cadence ?? "daily") as "daily" | "weekly",
                                 order: (envelopes.order ?? "random") as "random" | "reverse",
-                                maxDrawsPerDay: 1,
+                                maxDrawsPerDay: n,
                               },
                             })
                           }
                         >
-                          1/day
+                          {n}/day
                         </button>
-                        <button
-                          className={`rounded border px-3 py-1 text-xs ${(envelopes.maxDrawsPerDay ?? 1) === 2 ? "bg-black text-white" : ""}`}
-                          onClick={() =>
-                            patchSettings(ch.userChallengeId, {
-                              envelopes: {
-                                cadence: (envelopes.cadence ?? "daily") as "daily" | "weekly",
-                                order: (envelopes.order ?? "random") as "random" | "reverse",
-                                maxDrawsPerDay: 2,
-                              },
-                            })
-                          }
-                        >
-                          2/day
-                        </button>
-                      </>
-                    )}
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
             </div>
           );
         })}

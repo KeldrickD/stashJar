@@ -214,6 +214,11 @@ export type TodayBanner =
       label: string;
       subLabel?: string;
     }
+  | {
+      type: "waiting_for_funds";
+      message: string;
+      lastRefreshAt?: string;
+    }
   | { type: string; [k: string]: any };
 
 export type TodayResponse = {
@@ -226,9 +231,12 @@ export type HomeContext = "pwa" | "miniapp";
 
 export type Tier = "NORMIE" | "CURIOUS" | "POWER" | "DEV";
 export type FundingUiMode = "fundcard" | "open_in_wallet";
+export type FundingDeeplinkKind = "env" | "generated" | "none";
+export type FundingRail = "FUND_CARD" | "OPEN_IN_WALLET" | "MANUAL_REFRESH_ONLY";
 
 export type FeatureActions = {
   canFund: boolean;
+  preferredFundingRail: FundingRail;
   canWithdrawToWallet: boolean;
   canWithdrawToBank: boolean;
   canDiceTwoDice: boolean;
@@ -243,6 +251,21 @@ export type FeatureActions = {
   canWeeklyRecapEmail: boolean;
 };
 
+export type ChallengeLimits = {
+  dice: {
+    allowedSides: number[];
+    allowedMultiDice: number[];
+    allowedMultipliers: number[];
+    maxSides?: number;
+  };
+  envelopes100: {
+    allowedCadence: ("daily" | "weekly")[];
+    allowedOrder: ("random" | "reverse")[];
+    maxDrawsPerDayMax: number;
+    maxDrawsPerWeekMax?: number;
+  };
+};
+
 export type TierLimits = {
   fundingSessionsPerMinute: number;
   fundingSessionsPerDay: number;
@@ -254,6 +277,7 @@ export type TierLimits = {
   dailyAutoSaveCapCents: number;
   perRunAutoSaveCapCents: number;
   maxSingleTempSaveCents: number;
+  challenges: ChallengeLimits;
 };
 
 export type UserConfigResponse = {
@@ -418,6 +442,7 @@ export const api = {
           title?: string;
           asset?: string;
           deeplink?: string;
+          deeplinkKind: FundingDeeplinkKind;
           helperText?: string;
         };
       };
@@ -449,6 +474,10 @@ export const api = {
         templateSlug: string | null;
         progress?: string;
         settings?: Record<string, unknown>;
+        bounds?: {
+          dice?: ChallengeLimits["dice"];
+          envelopes100?: ChallengeLimits["envelopes100"];
+        };
       }>;
     }>(
       "GET",
@@ -477,6 +506,10 @@ export const api = {
         templateSlug: string | null;
         progress?: string;
         settings?: Record<string, unknown>;
+        bounds?: {
+          dice?: ChallengeLimits["dice"];
+          envelopes100?: ChallengeLimits["envelopes100"];
+        };
       }>;
     }>("GET", `/users/${userId}/challenges/active`),
 

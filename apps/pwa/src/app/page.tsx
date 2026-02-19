@@ -25,8 +25,18 @@ function getResetsInUtc(): string {
   return `${m}m`;
 }
 
+function resolveFundingUiModeFromRail(
+  rail: FeatureActions["preferredFundingRail"] | undefined,
+  fallbackMode: "fundcard" | "open_in_wallet" | undefined,
+): "fundcard" | "open_in_wallet" {
+  if (rail === "OPEN_IN_WALLET") return "open_in_wallet";
+  if (rail === "FUND_CARD") return "fundcard";
+  return fallbackMode ?? "fundcard";
+}
+
 const DEFAULT_ACTIONS: FeatureActions = {
   canFund: false,
+  preferredFundingRail: "MANUAL_REFRESH_ONLY",
   canWithdrawToWallet: false,
   canWithdrawToBank: false,
   canDiceTwoDice: false,
@@ -57,6 +67,7 @@ export default function Home() {
   const [todayBanner, setTodayBanner] = useState<TodayBanner | undefined>(undefined);
   const [todayError, setTodayError] = useState<string | null>(null);
   const [focusEventId, setFocusEventId] = useState<string | null>(null);
+  const [focusUserChallengeId, setFocusUserChallengeId] = useState<string | null>(null);
   const [activeChallenges, setActiveChallenges] = useState<
     Array<{ userChallengeId: string; name: string; templateSlug: string | null; progress?: string }>
   >([]);
@@ -110,7 +121,12 @@ export default function Home() {
       setWalletAddress((home as any).wallet?.address ?? null);
       setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
       setMaxCreditsPerDayCents((home as any).funding?.limits?.maxCreditsPerDayCents ?? undefined);
-      setFundingUiMode(((home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined) ?? "fundcard");
+      setFundingUiMode(
+        resolveFundingUiModeFromRail(
+          (home.config.actions as FeatureActions | undefined)?.preferredFundingRail,
+          (home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined,
+        ),
+      );
       setFundingDeeplink((home as any).funding?.ui?.deeplink ?? undefined);
       setFundingHelperText((home as any).funding?.ui?.helperText ?? undefined);
       setTier(home.config.tier);
@@ -234,7 +250,12 @@ export default function Home() {
           setWalletAddress((home as any).wallet?.address ?? null);
           setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
           setMaxCreditsPerDayCents((home as any).funding?.limits?.maxCreditsPerDayCents ?? undefined);
-          setFundingUiMode(((home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined) ?? "fundcard");
+          setFundingUiMode(
+            resolveFundingUiModeFromRail(
+              (home.config.actions as FeatureActions | undefined)?.preferredFundingRail,
+              (home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined,
+            ),
+          );
           setFundingDeeplink((home as any).funding?.ui?.deeplink ?? undefined);
           setFundingHelperText((home as any).funding?.ui?.helperText ?? undefined);
           setTier(home.config.tier);
@@ -268,6 +289,16 @@ export default function Home() {
   }, [router, pathname, homeContext]);
 
   useEffect(() => {
+    const focus = searchParams?.get("focus");
+    const ucid = searchParams?.get("userChallengeId");
+    if (focus === "challenge" && ucid) {
+      setFocusUserChallengeId(ucid);
+    } else {
+      setFocusUserChallengeId(null);
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
     if (!focusEventId) return;
     const el = document.getElementById(`card_${focusEventId}`);
     if (!el) return;
@@ -278,6 +309,19 @@ export default function Home() {
     }, 2000);
     return () => clearTimeout(timeout);
   }, [focusEventId, todayCards]);
+
+  useEffect(() => {
+    if (!focusUserChallengeId) return;
+    const cardEl = document.querySelector(`[data-user-challenge-id="${focusUserChallengeId}"]`) as HTMLElement | null;
+    const activeEl = document.getElementById(`active_uc_${focusUserChallengeId}`);
+    const target = cardEl ?? activeEl;
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    const timeout = setTimeout(() => {
+      setFocusUserChallengeId(null);
+    }, 2000);
+    return () => clearTimeout(timeout);
+  }, [focusUserChallengeId, todayCards, activeChallenges]);
 
   useEffect(() => {
     if (!toastMsg) return;
@@ -312,7 +356,12 @@ export default function Home() {
       setWalletAddress((home as any).wallet?.address ?? null);
       setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
       setMaxCreditsPerDayCents((home as any).funding?.limits?.maxCreditsPerDayCents ?? undefined);
-      setFundingUiMode(((home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined) ?? "fundcard");
+      setFundingUiMode(
+        resolveFundingUiModeFromRail(
+          (home.config.actions as FeatureActions | undefined)?.preferredFundingRail,
+          (home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined,
+        ),
+      );
       setFundingDeeplink((home as any).funding?.ui?.deeplink ?? undefined);
       setFundingHelperText((home as any).funding?.ui?.helperText ?? undefined);
       setTier(home.config.tier);
@@ -496,12 +545,22 @@ export default function Home() {
           const userChallengeId = (card as any).userChallengeId;
           const key = `${card.type}_${eventId ?? userChallengeId ?? card.scheduledFor ?? index}`;
           const id = eventId ? `card_${eventId}` : undefined;
-          const highlight =
+          const highlightByEvent =
             focusEventId && eventId && focusEventId === eventId
               ? "ring-2 ring-yellow-400"
               : "";
+          const highlightByChallenge =
+            focusUserChallengeId && userChallengeId && focusUserChallengeId === userChallengeId
+              ? "ring-2 ring-yellow-400"
+              : "";
+          const highlight = `${highlightByEvent} ${highlightByChallenge}`.trim();
           return (
-            <div key={key} id={id} className={highlight}>
+            <div
+              key={key}
+              id={id}
+              className={highlight}
+              data-user-challenge-id={userChallengeId ?? undefined}
+            >
               {actions.canDiceChooseSides && (
                 <span className="text-xs font-medium text-violet-600 mb-1 inline-block">POWER</span>
               )}
@@ -542,16 +601,23 @@ export default function Home() {
       </section>
 
       {activeChallenges.length > 0 && (
-        <a
-          href="/challenges"
-          className="block rounded-xl border p-4 text-sm opacity-90 hover:opacity-100 transition-opacity"
-        >
-          <span className="font-medium">Active challenges: </span>
-          {activeChallenges
-            .map((c) => (c.progress ? `${c.name} (${c.progress})` : c.name))
-            .join(", ")}
-          <span className="ml-1">→</span>
-        </a>
+        <section className="rounded-xl border p-4 text-sm opacity-90 space-y-3">
+          <div className="font-medium">Active challenges</div>
+          <div className="flex flex-wrap gap-2">
+            {activeChallenges.map((c) => (
+              <span
+                key={c.userChallengeId}
+                id={`active_uc_${c.userChallengeId}`}
+                className="rounded border px-2 py-1 text-xs"
+              >
+                {c.progress ? `${c.name} (${c.progress})` : c.name}
+              </span>
+            ))}
+          </div>
+          <a href="/challenges" className="inline-block underline">
+            Manage challenges →
+          </a>
+        </section>
       )}
 
       <section className="rounded-xl border p-5 space-y-3">

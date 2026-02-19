@@ -1145,32 +1145,46 @@ function buildWalletAndFunding(
   };
 
   const funding = fundingConfigured && ready
-    ? {
-        enabled: true,
-        provider: "coinbase" as const,
-        rail: "USDC",
-        limits: {
-          minDepositCents: limitsForUi.minDepositCents,
-          maxDepositCents: limitsForUi.maxDepositCents,
-          maxCreditPerCallCents: limitsForUi.maxCreditPerCallCents,
-          maxCreditsPerDayCents: limitsForUi.maxCreditsPerDayCents,
-        },
-        lastRefreshAt: uw?.lastFundingRefreshAt?.toISOString() ?? null,
-        lastObservedBalanceMicros: uw?.lastObservedBalanceMicros ?? null,
-        ui: {
-          primaryCtaLabel: "Add money",
-          secondaryCtaLabel: "Withdraw",
-          mode: (context === "miniapp" ? "open_in_wallet" : "fundcard") as "fundcard" | "open_in_wallet",
-          title: "Add money",
-          asset: "USDC",
-          ...(context === "miniapp" && env.data.MINIAPP_FUND_DEEPLINK?.trim()
-            ? { deeplink: env.data.MINIAPP_FUND_DEEPLINK.trim() }
-            : {}),
-          helperText: context === "miniapp"
-            ? "Open wallet, add funds, return to this app, and we will refresh your balance."
-            : "Use a debit card or bank transfer. After you finish, come back here to see your balance.",
-        },
-      }
+    ? (() => {
+        const mode = (context === "miniapp" ? "open_in_wallet" : "fundcard") as "fundcard" | "open_in_wallet";
+        const envDeeplink = env.data.MINIAPP_FUND_DEEPLINK?.trim();
+        let deeplink: string | undefined;
+        let deeplinkKind: "env" | "generated" | "none" = "none";
+        if (context === "miniapp") {
+          if (envDeeplink) {
+            deeplink = envDeeplink;
+            deeplinkKind = "env";
+          } else if (uw?.address) {
+            deeplink = `https://go.cb-w.com/wallet/send?address=${encodeURIComponent(uw.address)}&asset=USDC&chainId=8453`;
+            deeplinkKind = "generated";
+          }
+        }
+        return {
+          enabled: true,
+          provider: "coinbase" as const,
+          rail: "USDC",
+          limits: {
+            minDepositCents: limitsForUi.minDepositCents,
+            maxDepositCents: limitsForUi.maxDepositCents,
+            maxCreditPerCallCents: limitsForUi.maxCreditPerCallCents,
+            maxCreditsPerDayCents: limitsForUi.maxCreditsPerDayCents,
+          },
+          lastRefreshAt: uw?.lastFundingRefreshAt?.toISOString() ?? null,
+          lastObservedBalanceMicros: uw?.lastObservedBalanceMicros ?? null,
+          ui: {
+            primaryCtaLabel: "Add money",
+            secondaryCtaLabel: "Withdraw",
+            mode,
+            title: "Add money",
+            asset: "USDC",
+            helperText: context === "miniapp"
+              ? "Open your wallet app, send USDC on Base, then return here."
+              : "Use a debit card or bank transfer. After you finish, come back here to see your balance.",
+            ...(deeplink ? { deeplink } : {}),
+            deeplinkKind,
+          },
+        };
+      })()
     : {
         enabled: false,
         provider: null as string | null,
@@ -1187,6 +1201,7 @@ const HomeQuerySchema = z.object({
 
 type FeatureActions = {
   canFund: boolean;
+  preferredFundingRail: "FUND_CARD" | "OPEN_IN_WALLET" | "MANUAL_REFRESH_ONLY";
   canWithdrawToWallet: boolean;
   canWithdrawToBank: boolean;
   canDiceTwoDice: boolean;
@@ -1201,6 +1216,21 @@ type FeatureActions = {
   canWeeklyRecapEmail: boolean;
 };
 
+type ChallengeLimits = {
+  dice: {
+    allowedSides: number[];
+    allowedMultiDice: number[];
+    allowedMultipliers: number[];
+    maxSides?: number;
+  };
+  envelopes100: {
+    allowedCadence: ("daily" | "weekly")[];
+    allowedOrder: ("random" | "reverse")[];
+    maxDrawsPerDayMax: number;
+    maxDrawsPerWeekMax?: number;
+  };
+};
+
 type TierLimits = {
   fundingSessionsPerMinute: number;
   fundingSessionsPerDay: number;
@@ -1212,20 +1242,35 @@ type TierLimits = {
   dailyAutoSaveCapCents: number;
   perRunAutoSaveCapCents: number;
   maxSingleTempSaveCents: number;
+  challenges: ChallengeLimits;
 };
 
 function isPowerOrDev(tier: string): boolean {
   return tier === "POWER" || tier === "DEV";
 }
 
+function resolvePreferredFundingRail(params: {
+  context: "pwa" | "miniapp";
+  funding: { enabled: boolean; ui?: { mode?: "fundcard" | "open_in_wallet" } };
+}): "FUND_CARD" | "OPEN_IN_WALLET" | "MANUAL_REFRESH_ONLY" {
+  const { context, funding } = params;
+  if (!funding.enabled) return "MANUAL_REFRESH_ONLY";
+  if (context === "miniapp") {
+    return funding.ui?.mode === "open_in_wallet" ? "OPEN_IN_WALLET" : "FUND_CARD";
+  }
+  return "FUND_CARD";
+}
+
 function buildFeatureActions(params: {
   tier: string;
   resolvedFlags: Record<string, unknown>;
+  preferredFundingRail: "FUND_CARD" | "OPEN_IN_WALLET" | "MANUAL_REFRESH_ONLY";
 }): FeatureActions {
-  const { tier, resolvedFlags } = params;
+  const { tier, resolvedFlags, preferredFundingRail } = params;
   const power = isPowerOrDev(tier);
   return {
-    canFund: isFundingConfigured(),
+    canFund: preferredFundingRail !== "MANUAL_REFRESH_ONLY",
+    preferredFundingRail,
     canWithdrawToWallet: resolvedFlags.enableOnchainWithdrawToWallet === true,
     canWithdrawToBank: false,
     canDiceTwoDice: power,
@@ -1238,6 +1283,28 @@ function buildFeatureActions(params: {
     canMakeupSave: power,
     canPushReminders: PUSH_ENABLED,
     canWeeklyRecapEmail: power,
+  };
+}
+
+function buildChallengeLimits(params: {
+  tier: string;
+  rawFlags: Record<string, unknown> | null | undefined;
+}): ChallengeLimits {
+  const { tier } = params;
+  const power = isPowerOrDev(tier);
+  return {
+    dice: {
+      allowedSides: power ? [6, 12, 20, 100] : [6],
+      allowedMultiDice: power ? [1, 2] : [1],
+      allowedMultipliers: power ? [1, 10] : [1],
+      maxSides: 100,
+    },
+    envelopes100: {
+      allowedCadence: power ? ["daily", "weekly"] : ["daily"],
+      allowedOrder: power ? ["random", "reverse"] : ["random"],
+      maxDrawsPerDayMax: power ? 2 : 1,
+      maxDrawsPerWeekMax: power ? 14 : 7,
+    },
   };
 }
 
@@ -1278,15 +1345,41 @@ function buildTierLimits(params: {
     dailyAutoSaveCapCents,
     perRunAutoSaveCapCents,
     maxSingleTempSaveCents,
+    challenges: buildChallengeLimits({ tier, rawFlags: flags }),
   };
 }
 
 function buildUserConfig(params: {
   tier: string;
   rawFlags: Record<string, unknown> | null | undefined;
+  context?: "pwa" | "miniapp";
+  wallet?: {
+    address: string;
+    walletType: string;
+    chain: string;
+    lastFundingRefreshAt?: Date | null;
+    lastObservedBalanceMicros?: string | null;
+  } | null;
 }) {
   const resolvedFlags = resolveFlags(params.tier as any, params.rawFlags);
-  const actions = buildFeatureActions({ tier: params.tier, resolvedFlags: resolvedFlags as Record<string, unknown> });
+  const { funding } = buildWalletAndFunding(
+    {
+      tier: params.tier,
+      flags: params.rawFlags ?? null,
+      wallet: params.wallet ?? null,
+    },
+    resolvedFlags as Record<string, boolean>,
+    params.context ?? "pwa",
+  );
+  const preferredFundingRail = resolvePreferredFundingRail({
+    context: params.context ?? "pwa",
+    funding: funding as { enabled: boolean; ui?: { mode?: "fundcard" | "open_in_wallet" } },
+  });
+  const actions = buildFeatureActions({
+    tier: params.tier,
+    resolvedFlags: resolvedFlags as Record<string, unknown>,
+    preferredFundingRail,
+  });
   const limits = buildTierLimits({ tier: params.tier, rawFlags: params.rawFlags });
   return {
     tier: params.tier,
@@ -2400,13 +2493,15 @@ app.get("/users/:userId/config", { preHandler: [requireAuth, requireUserIdMatch]
   const userId = (req.params as any).userId as string;
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, tier: true, flags: true },
+    select: { id: true, tier: true, flags: true, wallet: true },
   });
   if (!user) return reply.code(404).send({ error: "User not found" });
 
   const config = buildUserConfig({
     tier: user.tier as string,
     rawFlags: (user.flags as Record<string, unknown> | null) ?? null,
+    context: "pwa",
+    wallet: user.wallet as any,
   });
   const payload = {
     userId: user.id,
@@ -2942,18 +3037,18 @@ async function buildTodayCards(
 /** Message hints for push worker (no need to know every challenge type). */
 function reminderMessageHints(
   name: string,
-  templateSlug: string | null,
+  userChallengeId: string,
   expectedAction: "draw" | "roll" | "input" | "save",
 ): { title: string; body: string; deeplink: string } {
   const baseTitle = name || "Your challenge";
-  const deeplink = "/";
+  const deeplink = `/?focus=challenge&userChallengeId=${encodeURIComponent(userChallengeId)}`;
   switch (expectedAction) {
     case "roll":
-      return { title: baseTitle, body: "Tap to roll and save today.", deeplink };
+      return { title: baseTitle, body: "Roll Dice Daily - it takes 5 seconds.", deeplink };
     case "input":
-      return { title: baseTitle, body: "Tap to log today's save.", deeplink };
+      return { title: baseTitle, body: "Log today's temperature and save.", deeplink };
     case "draw":
-      return { title: baseTitle, body: "Draw an envelope to save.", deeplink };
+      return { title: baseTitle, body: "Draw today's envelope.", deeplink };
     case "save":
       return { title: baseTitle, body: "Complete this week's save.", deeplink };
     default:
@@ -3040,7 +3135,7 @@ async function getRemindableChallenges(
     });
     if (sent) continue;
 
-    const hints = reminderMessageHints(uc.name, templateSlug, dueResult.expectedAction);
+    const hints = reminderMessageHints(uc.name, uc.id, dueResult.expectedAction);
     out.push({
       userChallengeId: uc.id,
       dueWindowKey: dueResult.dueWindowKey,
@@ -3095,17 +3190,27 @@ async function getActiveChallengesForUser(userId: string): Promise<{
     templateSlug: string | null;
     progress?: string;
     settings?: Record<string, unknown>;
+    bounds?: { dice?: ChallengeLimits["dice"]; envelopes100?: ChallengeLimits["envelopes100"] };
   }>;
 }> {
-  const ucs = await prisma.userChallenge.findMany({
-    where: { userId, status: "ACTIVE" },
-    include: { template: true },
+  const [ucs, user] = await Promise.all([
+    prisma.userChallenge.findMany({
+      where: { userId, status: "ACTIVE" },
+      include: { template: true },
+    }),
+    prisma.user.findUnique({ where: { id: userId }, select: { tier: true, flags: true } }),
+  ]);
+  const challengeLimits = buildChallengeLimits({
+    tier: (user?.tier as string) ?? "NORMIE",
+    rawFlags: (user?.flags as Record<string, unknown>) ?? null,
   });
+
   const list = ucs.map((uc) => {
     const name = uc?.name ?? (uc.template as any)?.name ?? "Challenge";
     const slug = (uc.template as any)?.slug ?? null;
     let progress: string | undefined;
     let settings: Record<string, unknown> | undefined;
+    let bounds: { dice?: ChallengeLimits["dice"]; envelopes100?: ChallengeLimits["envelopes100"] } | undefined;
     const rules = (uc.rules as any) ?? {};
     if (rules.type === "envelopes") {
       const state = (uc as any).state as { used?: number[] } | null;
@@ -3120,6 +3225,7 @@ async function getActiveChallengesForUser(userId: string): Promise<{
           maxDrawsPerDay: effective.maxDrawsPerDay,
         },
       };
+      if (slug === "100_envelopes") bounds = { envelopes100: challengeLimits.envelopes100 };
     } else if (rules.type === "dice") {
       const effective = getEffectiveDiceSettings({ rules, settings: (uc.settings as any) ?? {} });
       settings = {
@@ -3129,6 +3235,7 @@ async function getActiveChallengesForUser(userId: string): Promise<{
           multiplier: effective.multiplier,
         },
       };
+      if (slug === "dice_daily" || slug === "dice") bounds = { dice: challengeLimits.dice };
     } else if (rules.type === "temperature") {
       const amount = rules.amount ?? {};
       const st = (uc.settings as any) ?? {};
@@ -3136,7 +3243,7 @@ async function getActiveChallengesForUser(userId: string): Promise<{
       const effectiveScale = override === 1 || override === 10 ? override : Number(amount.scale ?? 1);
       settings = { scaleOverride: effectiveScale };
     }
-    return { userChallengeId: uc.id, name, templateSlug: slug, progress, settings };
+    return { userChallengeId: uc.id, name, templateSlug: slug, progress, settings, bounds };
   });
   return { userId, challenges: list };
 }
@@ -3328,6 +3435,8 @@ app.get("/users/:userId/home", { preHandler: [requireAuth, requireUserIdMatch] }
   const config = buildUserConfig({
     tier: user.tier as string,
     rawFlags: (user.flags as Record<string, unknown> | null) ?? null,
+    context,
+    wallet: user.wallet as any,
   });
   const flags = config.flags as Record<string, boolean>;
   const { wallet, funding } = buildWalletAndFunding(user, flags, context);
@@ -3359,6 +3468,20 @@ app.get("/users/:userId/home", { preHandler: [requireAuth, requireUserIdMatch] }
     };
   }
 
+  const THREE_MIN_MS = 3 * 60 * 1000;
+  let finalBanner = today.banner;
+  if (context === "miniapp" && funding.enabled && wallet.ready && !today.banner) {
+    const lastRefreshAt = (funding as { lastRefreshAt?: string | null }).lastRefreshAt;
+    if (lastRefreshAt && Date.now() - new Date(lastRefreshAt).getTime() > THREE_MIN_MS) {
+      finalBanner = {
+        type: "waiting_for_funds",
+        message:
+          "Waiting for funds? Open your wallet, finish sending USDC on Base, then return here.",
+        lastRefreshAt,
+      };
+    }
+  }
+
   const payload = {
     userId,
     config,
@@ -3367,7 +3490,7 @@ app.get("/users/:userId/home", { preHandler: [requireAuth, requireUserIdMatch] }
     streak,
     stash,
     stashAccountId,
-    today: { cards: today.cards, banner: today.banner },
+    today: { cards: today.cards, banner: finalBanner },
     activeChallenges: activeChallenges.challenges,
   };
 
