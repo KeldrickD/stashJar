@@ -31,26 +31,27 @@ export function EnvelopesCard({ userId, card, actions, onDone }: Props) {
     setBusy(true);
     try {
       const res = await api.drawEnvelope(card.userChallengeId);
-      if ((res as any)?.done) {
+      if (res?.done) {
         setMsg("Challenge complete! 🎉");
       } else {
-        const envelope = (res as any).envelope ?? 0;
-        const amountCents = (res as any).amountCents ?? 0;
+        const envelope = res.envelope ?? 0;
+        const amountCents = res.amountCents ?? 0;
         const dollars = amountCents / 100;
         setMsg(`Envelope ${envelope} → saving $${dollars.toFixed(0)} ✅`);
       }
       onDone();
-    } catch (e: any) {
-      let data: any = null;
+    } catch (e: unknown) {
+      let data: { error?: string } | null = null;
       try {
-        data = typeof e?.message === "string" ? JSON.parse(e.message) : null;
+        const msg = e instanceof Error ? e.message : "";
+        data = typeof msg === "string" ? (JSON.parse(msg) as { error?: string }) : null;
       } catch {
         data = null;
       }
       const dailyLimit =
         typeof data === "object" && data?.error === "daily_limit";
       setErr(
-        dailyLimit ? "Come back tomorrow." : (e?.message ?? "Something went wrong"),
+        dailyLimit ? "Come back tomorrow." : (e instanceof Error ? e.message : "Something went wrong"),
       );
     } finally {
       setBusy(false);
@@ -71,8 +72,8 @@ export function EnvelopesCard({ userId, card, actions, onDone }: Props) {
       });
       setMsg("Envelope settings saved ✅");
       await onDone();
-    } catch (e: any) {
-      setErr(e?.message ?? "Something went wrong");
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "Something went wrong");
     } finally {
       setBusy(false);
     }

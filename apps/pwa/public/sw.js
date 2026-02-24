@@ -4,7 +4,7 @@ self.addEventListener("push", (event) => {
   if (event.data) {
     try {
       data = { ...data, ...event.data.json() };
-    } catch (_) {}
+    } catch {}
   }
   event.waitUntil(
     self.registration.showNotification(data.title, {

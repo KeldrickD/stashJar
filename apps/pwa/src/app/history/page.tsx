@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import { api } from "@/lib/api";
-import { getUserId, setUserId } from "@/lib/session";
+import { setUserId } from "@/lib/session";
 
 function fmt(cents: number) {
   const sign = cents >= 0 ? "+": "-";
@@ -13,7 +14,7 @@ function fmt(cents: number) {
 export default function HistoryPage() {
   const router = useRouter();
   const pathname = usePathname();
-  const [items, setItems] = useState<any[]>([]);
+  const [items, setItems] = useState<Array<{ occurredAt: string; type: string; amountCents: number; memo?: string }>>([]);
   const [status, setStatus] = useState("");
 
   useEffect(() => {
@@ -25,8 +26,8 @@ export default function HistoryPage() {
         setStatus("Loading…");
         const res = await api.getTxHistory(uid);
         setItems(res.transactions ?? []);
-      } catch (e: any) {
-        if (e?.message === "unauthorized") {
+      } catch (e: unknown) {
+        if (e instanceof Error && e.message === "unauthorized") {
           const returnTo = pathname ? encodeURIComponent(pathname) : "";
           router.replace(returnTo ? `/login?returnTo=${returnTo}` : "/login");
           return;
@@ -41,9 +42,9 @@ export default function HistoryPage() {
     <main className="mx-auto max-w-xl p-6 space-y-6">
       <header>
         <h1 className="text-2xl font-bold">History</h1>
-        <a className="underline text-sm opacity-70" href="/">
+        <Link className="underline text-sm opacity-70" href="/">
           ← Back
-        </a>
+        </Link>
       </header>
 
       {status && <div className="text-sm opacity-70">{status}</div>}

@@ -16,13 +16,13 @@ type Props = {
 export function TodayCardRenderer({ userId, card, actions, onDone }: Props) {
   switch (card.type) {
     case "weather_wednesday":
-      return <WeatherWednesdayCard userId={userId} card={card as any} onDone={onDone} />;
+      return <WeatherWednesdayCard userId={userId} card={card as Extract<TodayCard, { type: "weather_wednesday" }>} onDone={onDone} />;
     case "temperature_daily":
-      return <TemperatureCard userId={userId} card={card as any} onDone={onDone} />;
+      return <TemperatureCard userId={userId} card={card as Extract<TodayCard, { type: "temperature_daily" }>} onDone={onDone} />;
     case "dice_daily":
-      return <DiceCard userId={userId} card={card as any} actions={actions} onDone={onDone} />;
+      return <DiceCard userId={userId} card={card as Extract<TodayCard, { type: "dice_daily" }>} actions={actions} onDone={onDone} />;
     case "envelopes_100":
-      return <EnvelopesCard userId={userId} card={card as any} actions={actions} onDone={onDone} />;
+      return <EnvelopesCard userId={userId} card={card as Extract<TodayCard, { type: "envelopes_100" }>} actions={actions} onDone={onDone} />;
     default:
       return (
         <section className="rounded-xl border p-5 space-y-2">

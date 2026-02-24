@@ -64,8 +64,8 @@ export function PushReminderToggle() {
       const auth = arrayBufferToBase64(sub.getKey("auth")!);
       await api.pushSubscribe({ endpoint, keys: { p256dh, auth } });
       await refreshStatus();
-    } catch (e: any) {
-      setError(e?.message ?? "Failed to enable reminders");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to enable reminders");
     } finally {
       setLoading(false);
     }
@@ -84,8 +84,8 @@ export function PushReminderToggle() {
         }
       }
       await refreshStatus();
-    } catch (e: any) {
-      setError(e?.message ?? "Failed to disable");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to disable");
     } finally {
       setLoading(false);
     }
