@@ -152,10 +152,12 @@ const RATE_WINDOW_MS = 60_000;
 const RATE_LIMIT_IP = 60;
 const RATE_LIMIT_USER_ACTIONS = 30;
 const RATE_LIMIT_FUNDING_REFRESH = 10;
+const RATE_LIMIT_EVENT_TRACKING = 60;
 const rateLimitIP = new Map<string, { count: number; resetAt: number }>();
 const rateLimitUser = new Map<string, { count: number; resetAt: number }>();
 const rateLimitFundingRefresh = new Map<string, { count: number; resetAt: number }>();
 const rateLimitFundingSession = new Map<string, { count: number; resetAt: number }>();
+const rateLimitEventTracking = new Map<string, { count: number; resetAt: number }>();
 
 function checkRateLimit(key: string, map: Map<string, { count: number; resetAt: number }>, limit: number): boolean {
   const now = Date.now();
@@ -181,6 +183,53 @@ function getClientIP(req: any): string {
 function hashIp(ip: string): string | null {
   if (!ip || ip === "unknown") return null;
   return crypto.createHash("sha256").update(ip, "utf8").digest("hex").slice(0, 32);
+}
+
+function normalizeAppContext(value: unknown): "pwa" | "miniapp" | undefined {
+  if (typeof value !== "string") return undefined;
+  const v = value.toLowerCase().trim();
+  if (v === "pwa" || v === "miniapp") return v;
+  return undefined;
+}
+
+function resolveAppContext(params: { queryContext?: unknown; headerContext?: unknown }): "pwa" | "miniapp" {
+  return normalizeAppContext(params.queryContext) ?? normalizeAppContext(params.headerContext) ?? "pwa";
+}
+
+const TrackEventBodySchema = z.object({
+  event: z.enum([
+    "visit_home",
+    "auth_success",
+    "challenge_started",
+    "first_save_completed",
+    "funding_initiated",
+    "funding_settled",
+  ]),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+function sanitizeEventMetadata(meta: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!meta) return undefined;
+  const blocked = new Set(["email", "token", "session", "auth", "cookie"]);
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(meta)) {
+    if (blocked.has(k.toLowerCase())) continue;
+    if (typeof v === "string" && v.length > 500) {
+      out[k] = v.slice(0, 500);
+      continue;
+    }
+    if (v && typeof v === "object") {
+      try {
+        const serialized = JSON.stringify(v);
+        out[k] = serialized.length > 1000 ? "[truncated_object]" : v;
+      } catch {
+        out[k] = "[unserializable_object]";
+      }
+      continue;
+    }
+    out[k] = v;
+  }
+  return out;
 }
 
 // --- Auth primitives (magic link + session) ---
@@ -1548,6 +1597,44 @@ app.get("/push/status", { preHandler: [requireAuth] }, async (req, reply) => {
     enabled: PUSH_ENABLED && !!VAPID_PUBLIC_KEY,
     subscriptionCount,
   });
+});
+
+app.post("/events/track", { preHandler: [requireAuth] }, async (req, reply) => {
+  const user = (req as any).user;
+  if (!user?.id) return reply.code(401).send({ error: "unauthorized" });
+
+  if (!checkRateLimit(`evt:${user.id}`, rateLimitEventTracking, RATE_LIMIT_EVENT_TRACKING)) {
+    return reply.code(429).header("Retry-After", "60").send({
+      error: "rate_limit",
+      retryAfterSeconds: 60,
+    });
+  }
+
+  const parsed = TrackEventBodySchema.safeParse((req.body as unknown) ?? {});
+  if (!parsed.success) {
+    return reply.code(400).send({ error: "invalid_event" });
+  }
+
+  const eventId = crypto.randomUUID();
+  const context = resolveAppContext({
+    queryContext: (req.query as { context?: unknown } | undefined)?.context,
+    headerContext: req.headers["x-app-context"],
+  });
+  const metadata = sanitizeEventMetadata(parsed.data.metadata);
+
+  app.log.info(
+    {
+      eventType: "product_event",
+      eventId,
+      event: parsed.data.event,
+      userId: user.id,
+      context,
+      metadata,
+    },
+    "product_event",
+  );
+
+  return reply.send({ ok: true, eventId });
 });
 
 app.get("/push/vapid-public", async (_req, reply) => {
@@ -3417,13 +3504,10 @@ app.get("/users/:userId/home", { preHandler: [requireAuth, requireUserIdMatch] }
   const userId = (req.params as any).userId as string;
   const startTime = Date.now();
   const parsedHomeQuery = HomeQuerySchema.safeParse((req as any).query ?? {});
-  const headerContextRaw = String(req.headers["x-app-context"] ?? "").toLowerCase().trim();
-  const headerContext = headerContextRaw === "miniapp" || headerContextRaw === "pwa"
-    ? (headerContextRaw as "pwa" | "miniapp")
-    : undefined;
-  const context: "pwa" | "miniapp" = parsedHomeQuery.success
-    ? (parsedHomeQuery.data.context ?? headerContext ?? "pwa")
-    : (headerContext ?? "pwa");
+  const context = resolveAppContext({
+    queryContext: parsedHomeQuery.success ? parsedHomeQuery.data.context : undefined,
+    headerContext: req.headers["x-app-context"],
+  });
 
   const user = await prisma.user.findUnique({
     where: { id: userId },
@@ -3433,10 +3517,16 @@ app.get("/users/:userId/home", { preHandler: [requireAuth, requireUserIdMatch] }
 
   await runDueForUser(userId);
 
-  const [streak, today, activeChallenges] = await Promise.all([
+  const [streak, today, activeChallenges, hasEverSavedChallengeCount] = await Promise.all([
     getStreakForUser(userId),
     buildTodayCards(userId, new Date()),
     getActiveChallengesForUser(userId),
+    prisma.challengeEvent.count({
+      where: {
+        userChallenge: { userId },
+        paymentIntentId: { not: null },
+      },
+    }),
   ]);
   if (!streak) return reply.code(404).send({ error: "User not found" });
 
@@ -3522,6 +3612,9 @@ app.get("/users/:userId/home", { preHandler: [requireAuth, requireUserIdMatch] }
     config,
     wallet,
     funding,
+    analytics: {
+      hasEverSavedChallenge: hasEverSavedChallengeCount > 0,
+    },
     streak,
     stash,
     stashAccountId,

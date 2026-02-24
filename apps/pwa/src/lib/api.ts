@@ -227,6 +227,21 @@ export type TodayResponse = {
 };
 
 export type HomeContext = "pwa" | "miniapp";
+export type ProductEventName =
+  | "visit_home"
+  | "auth_success"
+  | "challenge_started"
+  | "first_save_completed"
+  | "funding_initiated"
+  | "funding_settled";
+export type TrackEventRequest = {
+  event: ProductEventName;
+  metadata?: Record<string, unknown>;
+};
+export type TrackEventResponse = {
+  ok: true;
+  eventId: string;
+};
 
 export type Tier = "NORMIE" | "CURIOUS" | "POWER" | "DEV";
 export type FundingUiMode = "fundcard" | "open_in_wallet";
@@ -478,6 +493,9 @@ export const api = {
           helperText?: string;
         };
       };
+      analytics?: {
+        hasEverSavedChallenge?: boolean;
+      };
       streak: {
         userId?: string;
         todayCompleted: boolean;
@@ -518,6 +536,9 @@ export const api = {
 
   fundingRefresh: (userId: string, body?: { mode?: string; clientContext?: Record<string, string> }) =>
     req<FundingRefreshOk>("POST", `/users/${userId}/funding/refresh`, body ?? {}),
+
+  trackEvent: (body: TrackEventRequest) =>
+    req<TrackEventResponse>("POST", "/events/track", body),
 
   getFundingSession: (body?: { returnTo?: string; context?: "pwa" | "miniapp" }) =>
     req<FundingSessionOk>("POST", "/funding/session", body ?? {}),

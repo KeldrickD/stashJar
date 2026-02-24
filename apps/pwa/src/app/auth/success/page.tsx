@@ -2,6 +2,7 @@
 
 import { Suspense, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { api } from "@/lib/api";
 
 function sanitizeReturnTo(value: string | null): string {
   if (!value || typeof value !== "string") return "/";
@@ -16,6 +17,10 @@ function AuthSuccessContent() {
   const returnTo = sanitizeReturnTo(searchParams.get("returnTo"));
 
   useEffect(() => {
+    void api.trackEvent({
+      event: "auth_success",
+      metadata: { returnTo },
+    }).catch(() => undefined);
     const t = setTimeout(() => router.replace(returnTo), 800);
     return () => clearTimeout(t);
   }, [router, returnTo]);

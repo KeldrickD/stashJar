@@ -93,6 +93,7 @@ function HomeContent() {
   const [depositDollars, setDepositDollars] = useState("10");
   const [withdrawDollars, setWithdrawDollars] = useState("5");
   const [withdrawDailyLimitNextAllowedAt, setWithdrawDailyLimitNextAllowedAt] = useState<string | null>(null);
+  const [hasEverSavedChallenge, setHasEverSavedChallenge] = useState<boolean>(false);
 
   const advancedVisible = useMemo(
     () => flags.show_view_onchain || flags.show_powered_by_base_badge,
@@ -132,6 +133,12 @@ function HomeContent() {
       const status = res?.result?.status ?? null;
       const created = res?.result?.status === "SETTLED" ? res.result.createdPaymentIntents : 0;
       const deltaCents = res?.accounting?.deltaCents ?? 0;
+      if (status === "SETTLED") {
+        void api.trackEvent({
+          event: "funding_settled",
+          metadata: { deltaCents, context: homeContext },
+        }).catch(() => undefined);
+      }
       return { status: status ?? undefined, createdPaymentIntents: created, deltaCents };
     } catch (e: unknown) {
       try {
@@ -213,6 +220,7 @@ function HomeContent() {
           setFundingDeeplink(home.funding?.ui?.deeplink ?? undefined);
           setFundingDeeplinkKind(home.funding?.ui?.deeplinkKind ?? undefined);
           setFundingHelperText(home.funding?.ui?.helperText ?? undefined);
+          setHasEverSavedChallenge(home.analytics?.hasEverSavedChallenge === true);
           setTier(home.config.tier);
           setFlags(home.config.flags as Record<string, boolean>);
           setActions(home.config.actions ?? DEFAULT_ACTIONS);
@@ -224,6 +232,13 @@ function HomeContent() {
           setTodayError(null);
           const stored = localStorage.getItem("focusEventId");
           if (stored) setFocusEventId(stored);
+          if (typeof sessionStorage !== "undefined" && !sessionStorage.getItem("ev_visit_home")) {
+            sessionStorage.setItem("ev_visit_home", "1");
+            void api.trackEvent({
+              event: "visit_home",
+              metadata: { context: homeContext },
+            }).catch(() => undefined);
+          }
         } catch (err: unknown) {
           if (alive) setTodayError(err instanceof Error ? err.message : "Failed to load home");
           if (alive) setTodayCards([]);
@@ -317,6 +332,20 @@ function HomeContent() {
       setFundingDeeplink(home.funding?.ui?.deeplink ?? undefined);
       setFundingDeeplinkKind(home.funding?.ui?.deeplinkKind ?? undefined);
       setFundingHelperText(home.funding?.ui?.helperText ?? undefined);
+      const nextHasEverSavedChallenge = home.analytics?.hasEverSavedChallenge === true;
+      if (
+        !hasEverSavedChallenge &&
+        nextHasEverSavedChallenge &&
+        typeof sessionStorage !== "undefined" &&
+        !sessionStorage.getItem("ev_first_save_completed")
+      ) {
+        sessionStorage.setItem("ev_first_save_completed", "1");
+        void api.trackEvent({
+          event: "first_save_completed",
+          metadata: { context: homeContext },
+        }).catch(() => undefined);
+      }
+      setHasEverSavedChallenge(nextHasEverSavedChallenge);
       setTier(home.config.tier);
       setFlags(home.config.flags as Record<string, boolean>);
       setActions(home.config.actions ?? DEFAULT_ACTIONS);

@@ -52,6 +52,7 @@ export function FundingCta({
   context = "pwa",
   uiMode = "fundcard",
   deeplink,
+  deeplinkKind = "none",
   helperText,
   lastRefreshAt,
   busy,
@@ -150,6 +151,15 @@ export function FundingCta({
   const handleAddMoneyClick = async () => {
     if (preferredFundingRail === "OPEN_IN_WALLET") {
       if (deeplink) {
+        void api.trackEvent({
+          event: "funding_initiated",
+          metadata: {
+            rail: preferredFundingRail,
+            deeplinkKind,
+            context,
+            path: "deeplink",
+          },
+        }).catch(() => undefined);
         window.location.href = deeplink;
         return;
       }
@@ -160,27 +170,36 @@ export function FundingCta({
 
     if (preferredFundingRail === "FUND_CARD") {
       setSessionLoading(true);
-    setDailyLimitNextAllowedAt(null);
-    try {
-      const session = await api.getFundingSession({ context });
-      if (session?.sessionToken) {
-        setFundingSessionToken(session.sessionToken);
-        setShowFundingModal(true);
-        setSessionLoading(false);
-        return;
+      setDailyLimitNextAllowedAt(null);
+      try {
+        const session = await api.getFundingSession({ context });
+        if (session?.sessionToken) {
+          void api.trackEvent({
+            event: "funding_initiated",
+            metadata: {
+              rail: preferredFundingRail,
+              deeplinkKind,
+              context,
+              path: "fundcard_session",
+            },
+          }).catch(() => undefined);
+          setFundingSessionToken(session.sessionToken);
+          setShowFundingModal(true);
+          setSessionLoading(false);
+          return;
+        }
+      } catch (e: unknown) {
+        const retry = getRetryInfo(e);
+        if (retry?.kind === "daily_limit") {
+          setToast("Daily add limit reached — resets at midnight UTC");
+          setDailyLimitNextAllowedAt(retry.nextAllowedAt ?? null);
+          setSessionLoading(false);
+          return;
+        }
+        // 501 or 503 or 409: fall back to manual refresh
       }
-    } catch (e: unknown) {
-      const retry = getRetryInfo(e);
-      if (retry?.kind === "daily_limit") {
-        setToast("Daily add limit reached — resets at midnight UTC");
-        setDailyLimitNextAllowedAt(retry.nextAllowedAt ?? null);
-        setSessionLoading(false);
-        return;
-      }
-      // 501 or 503 or 409: fall back to manual refresh
-    }
-    setSessionLoading(false);
-    await handleAddMoney();
+      setSessionLoading(false);
+      await handleAddMoney();
     }
   };
 

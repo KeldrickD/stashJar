@@ -90,6 +90,15 @@ export default function ChallengesPage() {
         templateSlug: slug,
         primeToday: true,
       });
+      void api.trackEvent({
+        event: "challenge_started",
+        metadata: {
+          templateSlug: slug,
+          userChallengeId: res.userChallengeId,
+          context: "pwa",
+          primeToday: true,
+        },
+      }).catch(() => undefined);
       setActiveChallengeId(res.userChallengeId);
       setStatus(`Started: ${res.userChallengeId}`);
       await refreshContext(userId);
