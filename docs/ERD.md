@@ -1,146 +1,124 @@
-# Entity-Relationship Diagram – StashJar
+# ERD (Mermaid)
 
-Uses Mermaid ER diagrams. Renders automatically on GitHub.
+> This ERD is “conceptual but close to Prisma.” Some columns omitted for brevity, but relationships and key tables are accurate.
 
 ```mermaid
 erDiagram
+  User ||--o{ Session : has
+  User ||--o{ AuthToken : requests
+  User ||--o{ UserWallet : owns
+  User ||--o{ PushSubscription : has
+  User ||--o{ UserChallenge : runs
+  User ||--o{ PaymentIntent : creates
+
+  UserChallenge ||--o{ ChallengeEvent : schedules
+  UserChallenge ||--o{ ChallengeReminder : reminds
+  PaymentIntent ||--o{ LedgerEntry : posts
+  FundingSession }o--|| User : belongs_to
+
   User {
-    uuid id PK
-    string email UK "nullable"
+    string id PK
+    string email UK
     string tier
     json flags
     int currentStreakDays
     int bestStreakDays
-    string lastStreakDateUtc "YYYY-MM-DD nullable"
-    datetime createdAt
-    datetime updatedAt
+    string lastStreakDateUtc
   }
 
   Session {
-    uuid id PK
-    uuid userId FK
+    string id PK
+    string userId FK
     string sessionHash
-    datetime createdAt
     datetime expiresAt
-    datetime revokedAt "nullable"
-    string ip
-    string userAgent
+    datetime revokedAt
   }
 
   AuthToken {
-    uuid id PK
+    string id PK
     string email
     string tokenHash
-    string purpose
-    datetime createdAt
     datetime expiresAt
-    datetime consumedAt "nullable"
-    string ip
-    string userAgent
-    string returnTo "nullable"
+    datetime consumedAt
+    string returnTo
   }
 
   UserWallet {
-    uuid id PK
-    uuid userId FK
-    string walletType "SMART"
-    string chain "base"
+    string id PK
+    string userId FK
+    string walletType
+    string chain
     string address
-    string providerRef "nullable"
+    string providerRef
     string accountedPrincipalUsdcMicros
-    string lastObservedBalanceMicros "nullable"
-    datetime lastFundingRefreshAt "nullable"
-    datetime createdAt
-    datetime updatedAt
+    datetime lastFundingRefreshAt
+    string lastObservedBalanceMicros
   }
 
   FundingSession {
-    uuid id PK
-    uuid userId FK
-    string provider "coinbase"
-    string context "pwa|miniapp"
-    string sessionTokenHash "optional if stored"
+    string id PK
+    string userId FK
+    string provider
+    string context
     string walletAddress
     int chainId
     datetime expiresAt
-    string userAgent "nullable"
-    string ipHash "nullable"
-    json limitsSnapshot "nullable"
+    string ipHash
+    json limitsSnapshot
     datetime createdAt
+  }
+
+  PushSubscription {
+    string id PK
+    string userId FK
+    string endpoint
+    string p256dh
+    string auth
+    datetime revokedAt
   }
 
   UserChallenge {
-    uuid id PK
-    uuid userId FK
+    string id PK
+    string userId FK
     string templateSlug
-    string status "ACTIVE|COMPLETED|PAUSED"
+    string status
     json settings
     json state
-    datetime createdAt
-    datetime updatedAt
+    datetime startDate
   }
 
   ChallengeEvent {
-    uuid id PK
-    uuid userChallengeId FK
-    string eventType
-    datetime scheduledFor "nullable"
-    int amountCents "nullable"
-    uuid paymentIntentId "nullable"
+    string id PK
+    string userChallengeId FK
+    datetime scheduledFor
+    int amountCents
+    string paymentIntentId
     json metadata
-    datetime createdAt
   }
 
   ChallengeReminder {
-    uuid id PK
-    uuid userChallengeId FK
+    string id PK
+    string userChallengeId FK
     string dueWindowKey
-    string channel "PUSH|EMAIL"
+    string channel
     datetime sentAt
   }
 
   PaymentIntent {
-    uuid id PK
-    uuid userId FK
-    string type "DEPOSIT|WITHDRAW"
-    string status "INITIATED|SETTLED|CONFIRMED|FAILED"
+    string id PK
+    string userId FK
+    string type
+    string status
     int amountCents
     json metadata
     datetime createdAt
-    datetime updatedAt
   }
 
   LedgerEntry {
-    uuid id PK
-    uuid paymentIntentId FK
-    string accountId
-    string direction "DEBIT|CREDIT"
+    string id PK
+    string paymentIntentId FK
     int amountCents
-    string memo
+    string direction
     datetime createdAt
   }
-
-  OnchainAction {
-    uuid id PK
-    uuid userId FK
-    string actionType "VAULT_DEPOSIT|WITHDRAW_REQUEST|REDEEM|MARK"
-    string status "SUBMITTED|CONFIRMED|FAILED"
-    string txHash "nullable"
-    string chain
-    json metadata
-    datetime createdAt
-    datetime updatedAt
-  }
-
-  User ||--o{ Session : "has"
-  AuthToken }o--|| User : "creates on consume (find-or-create by email)"
-  User ||--o| UserWallet : "has"
-  User ||--o{ FundingSession : "mints"
-  User ||--o{ UserChallenge : "runs"
-  UserChallenge ||--o{ ChallengeEvent : "has"
-  UserChallenge ||--o{ ChallengeReminder : "reminded by"
-  User ||--o{ PaymentIntent : "owns"
-  PaymentIntent ||--o{ LedgerEntry : "posts"
-  User ||--o{ OnchainAction : "executes"
-  ChallengeEvent }o--|| PaymentIntent : "links when committed"
 ```

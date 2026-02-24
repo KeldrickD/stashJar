@@ -1,61 +1,56 @@
-# StashJar – Project Plan
+# Project Plan — StashJar
 
-## Vision
+## Guiding principles
+- Server is the source of truth for:
+  - what’s due, what’s actionable, caps, actions/limits, and UI mode.
+- Normie-safe by default.
+- Deterministic + idempotent backends (challenge events, funding refresh, reminders).
 
-StashJar is a habit-driven savings platform built for both Web2 users and Web3-native users.
+## Milestones
 
-It operates as:
+### M1 — Core habit loop (DONE)
+- Today cards + banner system
+- Challenges: temp, weather, dice, envelopes, weekly increment
+- Auto-commit and commit-pending sweeper
+- Streaks + “All done” state
 
-- **A Progressive Web App (PWA)**
-- **A Base Mini App (Frames / MiniKit style)**
+### M2 — Funding loop (DONE + ongoing hardening)
+- Wallet provision abstraction
+- Fund session token endpoint (Coinbase)
+- Refresh bridge with daily limits + polling UX
+- Miniapp open-in-wallet mode + focus/visibility refresh
+- FundingSession audit table
 
-The backend is the single source of truth for:
+### M3 — Push reminders (DONE)
+- PushSubscription model
+- Reminder job driven by challenge due windows
+- Deep links to best target (home vs challenges)
+- Service worker navigation to existing tab
 
-- Funding rails
-- Tier permissions
-- Daily limits
-- Challenge rules
-- Reminder targeting
+### M4 — Security and productionization (ONGOING)
+- Auth: magic links + sessions + sliding renewal (DONE)
+- Rate limits: IP + per-email + cooldown (DONE)
+- Action endpoint per-user rate limits (DONE)
+- Health endpoints + ledger integrity checks (DONE)
+- Remaining: production hardening + monitoring dashboards
 
----
+### M5 — Base miniapp packaging (NEXT)
+- Host configuration + canonical deeplink contract
+- Test matrix across embedded webviews
+- UX polish for “open wallet -> return -> credit”
 
-## Phases
+## Workstreams
+1) Product/UX: Today, banners, clarity, copy, streak/recovery, weekly recap.
+2) Backend correctness: idempotency, caps, windows, integrity checks.
+3) Funding: session minting, refresh bridge, rail selection, onchain read reliability.
+4) Push/email: reminders and recap.
+5) Observability: dashboards, alerting.
 
-### Phase 1 — Core Saving Engine (Complete)
-
-- Challenge system (temperature, dice, envelopes, weekly)
-- Due window engine
-- Persistent per-challenge settings
-- Make-up saves (POWER)
-- Streak tracking
-- Server-driven limits
-- Push reminders
-- Magic-link auth
-- Deposit & refresh bridge
-- Funding rails (FundCard + Open-in-wallet)
-- FundingSession logging
-
-### Phase 2 — Production Hardening
-
-- MiniApp packaging & runtime polish
-- Funding abuse detection
-- Analytics dashboard
-- Fraud heuristics
-- Withdraw-to-wallet UX polish
-- Funding conversion tracking
-
-### Phase 3 — Growth & Monetization
-
-- Tier upgrades
-- Streak shield monetization
-- Referral program
-- Sponsored challenges
-- Social savings challenges
-
-### Phase 4 — Scale
-
-- Background jobs (queue instead of intervals)
-- Rate-limit infra upgrade
-- Caching layer
-- Read replica
-- Metrics & observability
+## Release checklist
+- [ ] Deploy ledger-service with HTTPS + correct CORS credential settings
+- [ ] Resend domain verified (SPF/DKIM)
+- [ ] VAPID keys set, PUSH_ENABLED=true
+- [ ] FUNDING_PROVIDER=coinbase and CDP keys set
+- [ ] RPC_URL and USDC_ADDRESS for Base mainnet
+- [ ] Run migrations + prisma generate
+- [ ] Run full tests: due-window tests + contract tests

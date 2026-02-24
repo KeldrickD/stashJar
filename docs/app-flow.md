@@ -1,28 +1,46 @@
-# Application Flow – StashJar
+# App Flow — StashJar
 
-## PWA Flow
+## Home boot (PWA)
+1) `GET /auth/me`
+- if 401 -> redirect to `/login?returnTo=…`
+2) `GET /users/:id/home?context=pwa`
+- populate: config/actions/limits, wallet, funding, stash, today, active challenges
+3) Render:
+- funding CTA (mode from server)
+- streak chip
+- Today banner + cards
+- All done panel if complete
 
-1. Login →
-2. Home loads (`context=pwa`) →
-3. Rail = `FUND_CARD` →
-4. Add money → FundCard →
-5. Refresh bridge →
-6. Save challenge →
-7. Streak updated
+## Home boot (Miniapp shell)
+1) `GET /auth/me` (cookie-based session)
+2) `GET /users/:id/home?context=miniapp`
+- funding.ui.mode = open_in_wallet
+- deeplinkKind = env|generated|none
+- optional waiting_for_funds banner
+3) “Add money” opens deeplink
+4) On return to foreground (focus/visibility):
+- call funding refresh bridge
+- if SETTLED -> refetch home
 
-## MiniApp Flow
+## Funding flow (PWA)
+- Tap “Add money”
+- call `POST /funding/session` (if enabled)
+- open FundCard modal (session token)
+- on close: `POST /users/:id/funding/refresh`, poll if NO_CHANGE
+- update stash totals
 
-1. Open in frame →
-2. Home loads (`context=miniapp`) →
-3. Rail = `OPEN_IN_WALLET` →
-4. Add money → deeplink →
-5. Return → visibilitychange → refresh →
-6. If SETTLED → refetch home → clear banner
+## Challenge flow
+- Today card shown only if actionable
+- User completes:
+  - input temp / weather
+  - roll dice
+  - draw envelope
+- Server commits deposit + updates streak + activity
+- Client refetches home snapshot
 
-## Push Flow
-
-1. Push received →
-2. SW focuses tab →
-3. NAVIGATE message →
-4. Router replace →
-5. Scroll to challenge
+## Push flow
+- Worker computes remindable challenges (due & incomplete)
+- Sends push with deeplink to:
+  - home focus if a Today card exists
+  - otherwise `/challenges?focus=active&userChallengeId=...`
+- Notification click focuses existing tab and navigates in-app

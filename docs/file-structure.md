@@ -1,0 +1,49 @@
+# File Structure
+
+High-level (representative):
+
+- `services/ledger-service/`
+  - `prisma/`
+    - `schema.prisma`
+    - `migrations/`
+  - `src/`
+    - `server.ts`
+    - `lib/`
+      - `challengeDue.ts`
+      - `fundingLimits.ts`
+      - `fundingProvider.ts`
+      - `walletProvider.ts`
+      - `cdpSessionToken.ts`
+      - `chainRead.ts`
+      - `email/` (resend)
+      - `rateLimit.ts`
+- `services/onchain-service/`
+  - `src/`
+    - `worker.ts`
+    - `watchdog.ts`
+- `apps/pwa/`
+  - `src/`
+    - `app/`
+      - `page.tsx`
+      - `login/`
+      - `auth/success/`
+      - `challenges/`
+      - `history/`
+    - `components/`
+      - `TodayCardRenderer.tsx`
+      - `FundingCta.tsx`
+      - `FundingModal.tsx`
+      - `DiceCard.tsx`
+      - `TemperatureCard.tsx`
+      - `WeatherWednesdayCard.tsx`
+      - `EnvelopesCard.tsx`
+      - `ApplyMissedSavesBanner.tsx`
+      - `DailyLimitCountdown.tsx`
+      - `SwNavigateListener.tsx`
+    - `lib/`
+      - `api.ts`
+      - `todayOrder.ts`
+  - `public/`
+    - `sw.js`
+- `docs/` (this directory)
+- `CONTRIBUTING.md`
