@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api, getRetryInfo } from "@/lib/api";
+import { DailyLimitCountdown } from "./DailyLimitCountdown";
 import { FundingModal } from "./FundingModal";
 
 const POLL_INTERVAL_MS = 5_000;
@@ -16,19 +17,18 @@ function formatLastChecked(iso: string | null | undefined): string | null {
   return `${min}m ago`;
 }
 
-function formatResetsIn(retryAfterSeconds: number): string {
-  const h = Math.floor(retryAfterSeconds / 3600);
-  const m = Math.floor((retryAfterSeconds % 3600) / 60);
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
-}
+import type { FundingRail } from "@/lib/api";
 
 type Props = {
   walletAddress: string | null;
   enabled: boolean;
+  /** Server-derived; drives primary behavior (no client inference). */
+  preferredFundingRail: FundingRail;
   context?: "pwa" | "miniapp";
+  /** From home.funding.ui (source of truth for display). */
   uiMode?: "fundcard" | "open_in_wallet";
   deeplink?: string;
+  deeplinkKind?: "env" | "generated" | "none";
   helperText?: string;
   lastRefreshAt: string | null | undefined;
   busy: boolean;
@@ -44,9 +44,11 @@ type Props = {
 export function FundingCta({
   walletAddress,
   enabled,
+  preferredFundingRail,
   context = "pwa",
   uiMode = "fundcard",
   deeplink,
+  deeplinkKind,
   helperText,
   lastRefreshAt,
   busy,
@@ -61,7 +63,7 @@ export function FundingCta({
   const [showFundingModal, setShowFundingModal] = useState(false);
   const [fundingSessionToken, setFundingSessionToken] = useState<string | null>(null);
   const [sessionLoading, setSessionLoading] = useState(false);
-  const [dailyLimitResetIn, setDailyLimitResetIn] = useState<string | null>(null);
+  const [dailyLimitNextAllowedAt, setDailyLimitNextAllowedAt] = useState<string | null>(null);
   const pollUntil = useRef<number>(0);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -92,7 +94,7 @@ export function FundingCta({
         if (pollTimer.current) clearInterval(pollTimer.current);
         pollTimer.current = null;
         setToast("Daily limit reached — resets at midnight UTC");
-        setDailyLimitResetIn(formatResetsIn(result.retryAfterSeconds));
+        setDailyLimitNextAllowedAt(result.nextAllowedAt ?? null);
         return;
       }
       if (result?.status === "SETTLED" && (result?.createdPaymentIntents ?? 0) > 0) {
@@ -111,7 +113,7 @@ export function FundingCta({
   }, [polling, onAddMoney, onRefreshHome, setToast]);
 
   const handleAddMoney = async () => {
-    setDailyLimitResetIn(null);
+    setDailyLimitNextAllowedAt(null);
     try {
       const res = await onAddMoney();
       const result = res as
@@ -120,7 +122,7 @@ export function FundingCta({
         | undefined;
       if (result && "error" in result && result.error === "daily_limit") {
         setToast("Daily limit reached — resets at midnight UTC");
-        setDailyLimitResetIn(formatResetsIn(result.retryAfterSeconds));
+        setDailyLimitNextAllowedAt(result.nextAllowedAt ?? null);
         return;
       }
       onRefreshHome();
@@ -136,7 +138,7 @@ export function FundingCta({
       const retry = getRetryInfo(e);
       if (retry?.kind === "daily_limit") {
         setToast("Daily limit reached — resets at midnight UTC");
-        setDailyLimitResetIn(formatResetsIn(retry.retryAfterSeconds));
+        setDailyLimitNextAllowedAt(retry.nextAllowedAt ?? null);
       } else {
         setToast((e as Error)?.message ?? "Refresh failed");
       }
@@ -144,17 +146,19 @@ export function FundingCta({
   };
 
   const handleAddMoneyClick = async () => {
-    if (uiMode === "open_in_wallet") {
+    if (preferredFundingRail === "OPEN_IN_WALLET") {
       if (deeplink) {
         window.location.href = deeplink;
         return;
       }
+      setToast("Open your wallet app to add funds, then return here and tap Refresh.");
       await handleAddMoney();
       return;
     }
 
-    setSessionLoading(true);
-    setDailyLimitResetIn(null);
+    if (preferredFundingRail === "FUND_CARD") {
+      setSessionLoading(true);
+    setDailyLimitNextAllowedAt(null);
     try {
       const session = await api.getFundingSession({ context });
       if (session?.sessionToken) {
@@ -167,7 +171,7 @@ export function FundingCta({
       const retry = getRetryInfo(e);
       if (retry?.kind === "daily_limit") {
         setToast("Daily add limit reached — resets at midnight UTC");
-        setDailyLimitResetIn(formatResetsIn(retry.retryAfterSeconds));
+        setDailyLimitNextAllowedAt(retry.nextAllowedAt ?? null);
         setSessionLoading(false);
         return;
       }
@@ -175,6 +179,7 @@ export function FundingCta({
     }
     setSessionLoading(false);
     await handleAddMoney();
+    }
   };
 
   const handleCloseFundingModal = () => {
@@ -201,10 +206,12 @@ export function FundingCta({
     );
   }
 
-  if (!enabled) {
+  if (preferredFundingRail === "MANUAL_REFRESH_ONLY" || !enabled) {
     return (
       <section className="rounded-xl border p-5 space-y-3">
-        <p className="text-sm opacity-70">Funding not available right now.</p>
+        <p className="text-sm opacity-70">
+          {preferredFundingRail === "MANUAL_REFRESH_ONLY" ? "Funding not available right now." : "Funding not available right now."}
+        </p>
         <a href="/history" className="rounded border border-black px-4 py-2 font-medium inline-block">
           Withdraw
         </a>
@@ -239,10 +246,10 @@ export function FundingCta({
       {!polling && lastChecked && (
         <p className="text-xs opacity-70">Last checked {lastChecked}</p>
       )}
-      {dailyLimitResetIn && (
-        <p className="text-sm text-amber-700">Daily limit reached — resets in {dailyLimitResetIn}</p>
+      {dailyLimitNextAllowedAt && (
+        <DailyLimitCountdown nextAllowedAt={dailyLimitNextAllowedAt} label="Daily limit reached" />
       )}
-      {maxCreditsPerDayCents != null && maxCreditsPerDayCents > 0 && !dailyLimitResetIn && (
+      {maxCreditsPerDayCents != null && maxCreditsPerDayCents > 0 && !dailyLimitNextAllowedAt && (
         <p className="text-xs opacity-70">Daily add limit: ${(maxCreditsPerDayCents / 100).toFixed(0)}</p>
       )}
       <p className="text-xs opacity-70">

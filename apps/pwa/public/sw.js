@@ -19,15 +19,17 @@ self.addEventListener("push", (event) => {
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const url = event.notification.data?.deeplink ?? "/";
+  const fullUrl = url.startsWith("http") ? url : new URL(url, self.location.origin).href;
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
       for (const c of clientList) {
-        if (c.url.includes(self.location.origin) && "focus" in c) {
-          c.navigate(url);
-          return c.focus();
+        if (c.url.startsWith(self.location.origin) && "focus" in c) {
+          c.postMessage({ type: "NAVIGATE", url });
+          c.focus();
+          return;
         }
       }
-      if (self.clients.openWindow) return self.clients.openWindow(url);
+      if (self.clients.openWindow) return self.clients.openWindow(fullUrl);
     })
   );
 });

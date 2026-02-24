@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { api, type FeatureActions, TodayCard, TodayBanner } from "@/lib/api";
+import { api, getRetryInfo, type FeatureActions, TodayCard, TodayBanner } from "@/lib/api";
 import { getUserId, setUserId as saveUserId, clearUserId } from "@/lib/session";
 import { ApplyMissedSavesBanner } from "@/components/ApplyMissedSavesBanner";
+import { DailyLimitCountdown } from "@/components/DailyLimitCountdown";
 import { FundingCta } from "@/components/FundingCta";
 import { PushReminderToggle } from "@/components/PushReminderToggle";
 import { TodayCardRenderer } from "@/components/TodayCardRenderer";
@@ -23,15 +24,6 @@ function getResetsInUtc(): string {
   const m = totalMins % 60;
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
-}
-
-function resolveFundingUiModeFromRail(
-  rail: FeatureActions["preferredFundingRail"] | undefined,
-  fallbackMode: "fundcard" | "open_in_wallet" | undefined,
-): "fundcard" | "open_in_wallet" {
-  if (rail === "OPEN_IN_WALLET") return "open_in_wallet";
-  if (rail === "FUND_CARD") return "fundcard";
-  return fallbackMode ?? "fundcard";
 }
 
 const DEFAULT_ACTIONS: FeatureActions = {
@@ -91,10 +83,15 @@ export default function Home() {
   const [maxCreditsPerDayCents, setMaxCreditsPerDayCents] = useState<number | undefined>(undefined);
   const [fundingUiMode, setFundingUiMode] = useState<"fundcard" | "open_in_wallet">("fundcard");
   const [fundingDeeplink, setFundingDeeplink] = useState<string | undefined>(undefined);
+  const [fundingDeeplinkKind, setFundingDeeplinkKind] = useState<"env" | "generated" | "none" | undefined>(undefined);
   const [fundingHelperText, setFundingHelperText] = useState<string | undefined>(undefined);
+
+  const lastFocusRefreshAt = useRef<number>(0);
+  const FOCUS_REFRESH_DEBOUNCE_MS = 8_000;
 
   const [depositDollars, setDepositDollars] = useState("10");
   const [withdrawDollars, setWithdrawDollars] = useState("5");
+  const [withdrawDailyLimitNextAllowedAt, setWithdrawDailyLimitNextAllowedAt] = useState<string | null>(null);
 
   const advancedVisible = useMemo(
     () => flags.show_view_onchain || flags.show_powered_by_base_badge,
@@ -122,12 +119,10 @@ export default function Home() {
       setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
       setMaxCreditsPerDayCents((home as any).funding?.limits?.maxCreditsPerDayCents ?? undefined);
       setFundingUiMode(
-        resolveFundingUiModeFromRail(
-          (home.config.actions as FeatureActions | undefined)?.preferredFundingRail,
-          (home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined,
-        ),
+        ((home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined) ?? "fundcard",
       );
       setFundingDeeplink((home as any).funding?.ui?.deeplink ?? undefined);
+      setFundingDeeplinkKind((home as any).funding?.ui?.deeplinkKind ?? undefined);
       setFundingHelperText((home as any).funding?.ui?.helperText ?? undefined);
       setTier(home.config.tier);
       setFlags(home.config.flags as Record<string, boolean>);
@@ -169,8 +164,9 @@ export default function Home() {
     if (!userId) return;
     setFundingBusy(true);
     try {
+      const flow = actions.preferredFundingRail === "OPEN_IN_WALLET" ? "open_in_wallet" : "fundcard";
       const res = await api.fundingRefresh(userId, {
-        clientContext: { source: "pwa", flow: "fundcard", sessionHint: "fund_v1" },
+        clientContext: { source: homeContext, flow, sessionHint: "fund_v1" },
       });
       const status = res?.result?.status ?? null;
       const created = res?.result?.createdPaymentIntents ?? 0;
@@ -251,12 +247,10 @@ export default function Home() {
           setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
           setMaxCreditsPerDayCents((home as any).funding?.limits?.maxCreditsPerDayCents ?? undefined);
           setFundingUiMode(
-            resolveFundingUiModeFromRail(
-              (home.config.actions as FeatureActions | undefined)?.preferredFundingRail,
-              (home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined,
-            ),
+            ((home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined) ?? "fundcard",
           );
           setFundingDeeplink((home as any).funding?.ui?.deeplink ?? undefined);
+          setFundingDeeplinkKind((home as any).funding?.ui?.deeplinkKind ?? undefined);
           setFundingHelperText((home as any).funding?.ui?.helperText ?? undefined);
           setTier(home.config.tier);
           setFlags(home.config.flags as Record<string, boolean>);
@@ -357,12 +351,10 @@ export default function Home() {
       setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
       setMaxCreditsPerDayCents((home as any).funding?.limits?.maxCreditsPerDayCents ?? undefined);
       setFundingUiMode(
-        resolveFundingUiModeFromRail(
-          (home.config.actions as FeatureActions | undefined)?.preferredFundingRail,
-          (home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined,
-        ),
+        ((home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined) ?? "fundcard",
       );
       setFundingDeeplink((home as any).funding?.ui?.deeplink ?? undefined);
+      setFundingDeeplinkKind((home as any).funding?.ui?.deeplinkKind ?? undefined);
       setFundingHelperText((home as any).funding?.ui?.helperText ?? undefined);
       setTier(home.config.tier);
       setFlags(home.config.flags as Record<string, boolean>);
@@ -394,14 +386,25 @@ export default function Home() {
 
   async function doWithdraw() {
     if (!userId) return;
+    setWithdrawDailyLimitNextAllowedAt(null);
     setStatus("Requesting withdrawal…");
-    const amountCents = Math.round(Number(withdrawDollars) * 100);
-    const pi = await api.requestWithdraw(userId, amountCents);
-
-    setStatus("Marking paid…");
-    await api.markWithdrawPaid(pi.id);
-    await refresh();
-    setStatus("");
+    try {
+      const amountCents = Math.round(Number(withdrawDollars) * 100);
+      const pi = await api.requestWithdraw(userId, amountCents);
+      setStatus("Marking paid…");
+      await api.markWithdrawPaid(pi.id);
+      await refresh();
+      setStatus("");
+    } catch (e) {
+      const retry = getRetryInfo(e);
+      if (retry?.kind === "daily_limit") {
+        setWithdrawDailyLimitNextAllowedAt(retry.nextAllowedAt ?? null);
+        setToast("Withdraw daily limit reached.");
+      } else {
+        setToast((e as Error)?.message ?? "Withdraw failed");
+      }
+      setStatus("");
+    }
   }
 
   async function handleLogout() {
@@ -419,16 +422,30 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (homeContext !== "miniapp") return;
+    if (actions.preferredFundingRail !== "OPEN_IN_WALLET") return;
     if (!fundingEnabled || !walletReady) return;
-    if (fundingUiMode !== "open_in_wallet") return;
-    const onFocus = async () => {
-      await addMoneyRefresh();
-      await refreshEverything();
+    const tryReturnRefresh = async () => {
+      const now = Date.now();
+      if (now - lastFocusRefreshAt.current < FOCUS_REFRESH_DEBOUNCE_MS) return;
+      lastFocusRefreshAt.current = now;
+      const result = await addMoneyRefresh();
+      if (result && "status" in result && result.status === "SETTLED") {
+        await refreshEverything();
+      }
+    };
+    const onFocus = () => {
+      void tryReturnRefresh();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void tryReturnRefresh();
     };
     window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-  }, [homeContext, fundingEnabled, walletReady, fundingUiMode, userId]);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [actions.preferredFundingRail, fundingEnabled, walletReady, userId]);
 
   return (
     <main className="mx-auto max-w-xl p-6 space-y-6">
@@ -485,9 +502,11 @@ export default function Home() {
         <FundingCta
           walletAddress={walletAddress}
           enabled={fundingEnabled}
+          preferredFundingRail={actions.preferredFundingRail}
           context={homeContext}
           uiMode={fundingUiMode}
           deeplink={fundingDeeplink}
+          deeplinkKind={fundingDeeplinkKind}
           helperText={fundingHelperText}
           lastRefreshAt={lastFundingRefreshAt}
           busy={fundingBusy}
@@ -598,6 +617,9 @@ export default function Home() {
             Withdraw
           </button>
         </div>
+        {withdrawDailyLimitNextAllowedAt && (
+          <DailyLimitCountdown nextAllowedAt={withdrawDailyLimitNextAllowedAt} label="Withdraw daily limit reached" />
+        )}
       </section>
 
       {activeChallenges.length > 0 && (

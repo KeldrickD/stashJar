@@ -433,6 +433,7 @@ export const api = {
           maxCreditsPerDayCents: number;
         };
         reason?: "not_configured" | "wallet_not_ready";
+        disabledReason?: "not_configured" | "chain_unavailable" | "tier_restricted";
         lastRefreshAt?: string | null;
         lastObservedBalanceMicros?: string | null;
         ui?: {

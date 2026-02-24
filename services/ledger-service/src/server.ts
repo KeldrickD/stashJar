@@ -177,6 +177,12 @@ function getClientIP(req: any): string {
   return (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ?? req.ip ?? "unknown";
 }
 
+/** Optional IP hashing for audit (FundingSession); returns null if hashing disabled or IP missing. */
+function hashIp(ip: string): string | null {
+  if (!ip || ip === "unknown") return null;
+  return crypto.createHash("sha256").update(ip, "utf8").digest("hex").slice(0, 32);
+}
+
 // --- Auth primitives (magic link + session) ---
 const AUTH_TOKEN_TTL_MIN = env.data.AUTH_TOKEN_TTL_MIN ?? 15;
 /** Per-email cooldown: at most one magic link per email per this many seconds */
@@ -1190,6 +1196,7 @@ function buildWalletAndFunding(
         provider: null as string | null,
         rail: "USDC",
         reason: (!fundingConfigured ? "not_configured" : "wallet_not_ready") as "not_configured" | "wallet_not_ready",
+        disabledReason: (!fundingConfigured ? "not_configured" : "wallet_not_ready") as "not_configured" | "chain_unavailable" | "tier_restricted",
       };
 
   return { wallet, funding };
@@ -1249,16 +1256,15 @@ function isPowerOrDev(tier: string): boolean {
   return tier === "POWER" || tier === "DEV";
 }
 
+/** Rail is derived only from funding.ui.mode (server is source of truth). No context/tier inference. */
 function resolvePreferredFundingRail(params: {
-  context: "pwa" | "miniapp";
   funding: { enabled: boolean; ui?: { mode?: "fundcard" | "open_in_wallet" } };
 }): "FUND_CARD" | "OPEN_IN_WALLET" | "MANUAL_REFRESH_ONLY" {
-  const { context, funding } = params;
+  const { funding } = params;
   if (!funding.enabled) return "MANUAL_REFRESH_ONLY";
-  if (context === "miniapp") {
-    return funding.ui?.mode === "open_in_wallet" ? "OPEN_IN_WALLET" : "FUND_CARD";
-  }
-  return "FUND_CARD";
+  if (funding.ui?.mode === "open_in_wallet") return "OPEN_IN_WALLET";
+  if (funding.ui?.mode === "fundcard") return "FUND_CARD";
+  return "MANUAL_REFRESH_ONLY";
 }
 
 function buildFeatureActions(params: {
@@ -1372,7 +1378,6 @@ function buildUserConfig(params: {
     params.context ?? "pwa",
   );
   const preferredFundingRail = resolvePreferredFundingRail({
-    context: params.context ?? "pwa",
     funding: funding as { enabled: boolean; ui?: { mode?: "fundcard" | "open_in_wallet" } },
   });
   const actions = buildFeatureActions({
@@ -1824,18 +1829,34 @@ app.post("/users/:userId/withdraw/wallet", { preHandler: [requireAuth, requireUs
     return reply.code(429).send({ error: "cooldown", retryAfterSeconds: 30 });
   }
 
-  if (recent.length >= 3) {
-    return reply.code(429).send({ error: "daily_limit_count", limit: 3 });
-  }
-
   const dailyLimitCents = getWithdrawDailyLimitCents(user.tier as any);
   const used = recent.reduce((s, r) => s + r.amountCents, 0);
+  const startOfNextDayUTC = addDaysUtc(utcDateOnly(now), 1);
+  const retryAfterSeconds = secondsUntil(startOfNextDayUTC);
+
+  if (recent.length >= 3) {
+    return reply
+      .code(429)
+      .header("Retry-After", String(retryAfterSeconds))
+      .send({
+        error: "daily_limit",
+        retryAfterSeconds,
+        nextAllowedAt: startOfNextDayUTC.toISOString(),
+        limit: 3,
+      });
+  }
+
   if (dailyLimitCents <= 0 || used + amountCents > dailyLimitCents) {
-    return reply.code(429).send({
-      error: "daily_limit_amount",
-      limitCents: dailyLimitCents,
-      usedCents: used,
-    });
+    return reply
+      .code(429)
+      .header("Retry-After", String(retryAfterSeconds))
+      .send({
+        error: "daily_limit",
+        retryAfterSeconds,
+        nextAllowedAt: startOfNextDayUTC.toISOString(),
+        limitCents: dailyLimitCents,
+        usedCents: used,
+      });
   }
 
   const existing = await prisma.paymentIntent.findUnique({ where: { idempotencyKey } });
@@ -3396,9 +3417,13 @@ app.get("/users/:userId/home", { preHandler: [requireAuth, requireUserIdMatch] }
   const userId = (req.params as any).userId as string;
   const startTime = Date.now();
   const parsedHomeQuery = HomeQuerySchema.safeParse((req as any).query ?? {});
+  const headerContextRaw = String(req.headers["x-app-context"] ?? "").toLowerCase().trim();
+  const headerContext = headerContextRaw === "miniapp" || headerContextRaw === "pwa"
+    ? (headerContextRaw as "pwa" | "miniapp")
+    : undefined;
   const context: "pwa" | "miniapp" = parsedHomeQuery.success
-    ? (parsedHomeQuery.data.context ?? "pwa")
-    : "pwa";
+    ? (parsedHomeQuery.data.context ?? headerContext ?? "pwa")
+    : (headerContext ?? "pwa");
 
   const user = await prisma.user.findUnique({
     where: { id: userId },
@@ -3469,10 +3494,20 @@ app.get("/users/:userId/home", { preHandler: [requireAuth, requireUserIdMatch] }
   }
 
   const THREE_MIN_MS = 3 * 60 * 1000;
+  const ONE_USDC_MICROS = 1_000_000n;
   let finalBanner = today.banner;
   if (context === "miniapp" && funding.enabled && wallet.ready && !today.banner) {
     const lastRefreshAt = (funding as { lastRefreshAt?: string | null }).lastRefreshAt;
-    if (lastRefreshAt && Date.now() - new Date(lastRefreshAt).getTime() > THREE_MIN_MS) {
+    const uw = user.wallet as { lastObservedBalanceMicros?: string | null; accountedPrincipalUsdcMicros?: string | null } | null;
+    const observedMicros = uw?.lastObservedBalanceMicros ? BigInt(uw.lastObservedBalanceMicros) : 0n;
+    const accountedMicros = uw?.accountedPrincipalUsdcMicros ? BigInt(uw.accountedPrincipalUsdcMicros) : 0n;
+    const uncreditedMicros = observedMicros > accountedMicros ? observedMicros - accountedMicros : 0n;
+    const hasUncreditedBalance = uncreditedMicros >= ONE_USDC_MICROS;
+    if (
+      lastRefreshAt &&
+      Date.now() - new Date(lastRefreshAt).getTime() > THREE_MIN_MS &&
+      hasUncreditedBalance
+    ) {
       finalBanner = {
         type: "waiting_for_funds",
         message:
@@ -3541,6 +3576,10 @@ app.post("/funding/session", { preHandler: [requireAuth] }, async (req, reply) =
     sessionUser?.tier ?? "NORMIE",
     (sessionUser?.flags as Record<string, unknown>) ?? null,
   );
+  const refreshLimits = getFundingRefreshLimits(
+    sessionUser?.tier ?? "NORMIE",
+    (sessionUser?.flags as Record<string, unknown>) ?? null,
+  );
   if (!checkRateLimit(`funding_session:${userId}`, rateLimitFundingSession, sessionLimits.sessionsPerMinute)) {
     return reply.code(429).header("Retry-After", "60").send({ error: "rate_limit", retryAfterSeconds: 60 });
   }
@@ -3592,7 +3631,21 @@ app.post("/funding/session", { preHandler: [requireAuth] }, async (req, reply) =
   }
 
   await prisma.fundingSession.create({
-    data: { userId, provider: "coinbase", context: context ?? null },
+    data: {
+      userId,
+      provider: "coinbase",
+      context: context ?? null,
+      walletAddress: uw.address,
+      chainId: 8453,
+      expiresAt: new Date(result.expiresAt),
+      userAgent: (req.headers["user-agent"] as string) ?? null,
+      ipHash: hashIp(clientIp),
+      limitsSnapshot: {
+        minDepositCents: sessionLimits.minDepositCents,
+        maxDepositCents: sessionLimits.maxDepositCents,
+        maxCreditsPerDayCents: refreshLimits.maxCreditsPerDayCents,
+      },
+    },
   });
 
   reply.header("Cache-Control", "no-store");
@@ -5373,7 +5426,18 @@ async function runPushReminderJob(): Promise<void> {
     byUser.set(s.userId, list);
   }
   for (const [userId, userSubs] of byUser) {
-    const remindable = await getRemindableChallenges(userId, now);
+    const [remindable, todayData] = await Promise.all([
+      getRemindableChallenges(userId, now),
+      buildTodayCards(userId, now),
+    ]);
+    const todayChallengeIds = new Set(
+      (todayData.cards as any[]).map((c) => c.challengeId ?? c.userChallengeId).filter(Boolean),
+    );
+    for (const r of remindable) {
+      if (!todayChallengeIds.has(r.userChallengeId)) {
+        (r as { deeplink: string }).deeplink = `/challenges?focus=active&userChallengeId=${encodeURIComponent(r.userChallengeId)}`;
+      }
+    }
     for (const r of remindable) {
       let sent = false;
       for (const sub of userSubs) {

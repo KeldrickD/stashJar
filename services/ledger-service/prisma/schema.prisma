@@ -356,12 +356,18 @@ model UserWallet {
 }
 
 model FundingSession {
-  id        String   @id @default(uuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  provider  String   @default("coinbase")
-  context   String?  // "pwa" | "miniapp"
-  createdAt DateTime @default(now())
+  id              String    @id @default(uuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider        String    @default("coinbase")
+  context         String?   // "pwa" | "miniapp"
+  walletAddress   String?
+  chainId         Int?
+  expiresAt       DateTime?
+  userAgent       String?
+  ipHash          String?
+  limitsSnapshot  Json?     // { minDepositCents, maxDepositCents, maxCreditsPerDayCents }
+  createdAt       DateTime  @default(now())
 
   @@index([userId, createdAt])
   @@index([createdAt])
