@@ -1850,6 +1850,14 @@ app.get("/debug/funnel/daily", { preHandler: [requireAuth] }, async (req, reply)
     pwa: { counts: zeroCounts(), uniqueUsers: zeroUniqueUsers() },
     miniapp: { counts: zeroCounts(), uniqueUsers: zeroUniqueUsers() },
   };
+  const unionGlobal: Record<ProductEventName, Set<string>> = {
+    visit_home: new Set(),
+    auth_success: new Set(),
+    challenge_started: new Set(),
+    first_save_completed: new Set(),
+    funding_initiated: new Set(),
+    funding_settled: new Set(),
+  };
   const unionUsers: Record<AppContext, Record<ProductEventName, Set<string>>> = {
     pwa: {
       visit_home: new Set(),
@@ -1874,6 +1882,7 @@ app.get("/debug/funnel/daily", { preHandler: [requireAuth] }, async (req, reply)
     totalsCounts[e.event] += 1;
     totalsByContext[e.context].counts[e.event] += 1;
     unionUsers[e.context][e.event].add(e.userId);
+    unionGlobal[e.event].add(e.userId);
   }
 
   for (const ctx of ["pwa", "miniapp"] as const) {
@@ -1883,6 +1892,10 @@ app.get("/debug/funnel/daily", { preHandler: [requireAuth] }, async (req, reply)
       totalsUnique[ev] += u;
     }
   }
+  const totalsUniqueGlobal = zeroUniqueUsers();
+  for (const ev of ALL_PRODUCT_EVENTS) {
+    totalsUniqueGlobal[ev] = unionGlobal[ev].size;
+  }
 
   return reply.header("Cache-Control", "no-store").send({
     window: { days, fromDateUtc: fromDate, toDateUtc: toDate },
@@ -1891,6 +1904,7 @@ app.get("/debug/funnel/daily", { preHandler: [requireAuth] }, async (req, reply)
     totals: {
       counts: totalsCounts,
       uniqueUsers: totalsUnique,
+      uniqueUsersGlobal: totalsUniqueGlobal,
       conversion: computeConversion(totalsCounts),
       byContext: totalsByContext,
     },
