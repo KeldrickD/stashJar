@@ -232,6 +232,58 @@ function sanitizeEventMetadata(meta: Record<string, unknown> | undefined): Recor
   return out;
 }
 
+type AppContext = "pwa" | "miniapp";
+type ProductEventName =
+  | "visit_home"
+  | "auth_success"
+  | "challenge_started"
+  | "first_save_completed"
+  | "funding_initiated"
+  | "funding_settled";
+
+type ProductEventLog = {
+  ts: string;
+  dateUtc: string;
+  event: ProductEventName;
+  context: AppContext;
+  userId: string;
+  eventId: string;
+};
+
+class RingBuffer<T> {
+  private buf: (T | null)[];
+  private head = 0;
+  private len = 0;
+
+  constructor(private readonly capacity: number) {
+    this.buf = Array.from({ length: capacity }, () => null);
+  }
+
+  push(item: T) {
+    this.buf[this.head] = item;
+    this.head = (this.head + 1) % this.capacity;
+    this.len = Math.min(this.len + 1, this.capacity);
+  }
+
+  // Snapshot in chronological order (oldest -> newest)
+  toArray(): T[] {
+    const out: T[] = [];
+    const start = (this.head - this.len + this.capacity) % this.capacity;
+    for (let i = 0; i < this.len; i++) {
+      const idx = (start + i) % this.capacity;
+      const v = this.buf[idx];
+      if (v != null) out.push(v);
+    }
+    return out;
+  }
+
+  size() {
+    return this.len;
+  }
+}
+
+const PRODUCT_EVENT_RING = !isProd ? new RingBuffer<ProductEventLog>(5000) : null;
+
 // --- Auth primitives (magic link + session) ---
 const AUTH_TOKEN_TTL_MIN = env.data.AUTH_TOKEN_TTL_MIN ?? 15;
 /** Per-email cooldown: at most one magic link per email per this many seconds */
@@ -445,6 +497,78 @@ function secondsUntil(d: Date): number {
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+type FunnelCounts = Record<ProductEventName, number>;
+type FunnelConversion = {
+  visit_to_auth: number | null;
+  auth_to_challenge: number | null;
+  challenge_to_first_save: number | null;
+  funding_initiated_to_settled: number | null;
+};
+type FunnelDailyRow = {
+  dateUtc: string;
+  context: AppContext;
+  counts: FunnelCounts;
+  conversion: FunnelConversion;
+  uniqueUsers: Record<ProductEventName, number>;
+};
+
+const ALL_PRODUCT_EVENTS: ProductEventName[] = [
+  "visit_home",
+  "auth_success",
+  "challenge_started",
+  "first_save_completed",
+  "funding_initiated",
+  "funding_settled",
+];
+
+function zeroCounts(): FunnelCounts {
+  return {
+    visit_home: 0,
+    auth_success: 0,
+    challenge_started: 0,
+    first_save_completed: 0,
+    funding_initiated: 0,
+    funding_settled: 0,
+  };
+}
+
+function zeroUniqueUsers(): Record<ProductEventName, number> {
+  return {
+    visit_home: 0,
+    auth_success: 0,
+    challenge_started: 0,
+    first_save_completed: 0,
+    funding_initiated: 0,
+    funding_settled: 0,
+  };
+}
+
+function rate(numer: number, denom: number): number | null {
+  if (!denom) return null;
+  return Math.round((numer / denom) * 10000) / 10000;
+}
+
+function computeConversion(counts: FunnelCounts): FunnelConversion {
+  return {
+    visit_to_auth: rate(counts.auth_success, counts.visit_home),
+    auth_to_challenge: rate(counts.challenge_started, counts.auth_success),
+    challenge_to_first_save: rate(counts.first_save_completed, counts.challenge_started),
+    funding_initiated_to_settled: rate(counts.funding_settled, counts.funding_initiated),
+  };
+}
+
+function clampInt(n: number, min: number, max: number) {
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+function utcDateAddDays(dateStr: string, days: number): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return toDateStringUtc(dt);
 }
 
 function deterministicRoll(params: { userId: string; eventId: string; sides: number }): number {
@@ -1620,13 +1744,14 @@ app.post("/events/track", { preHandler: [requireAuth] }, async (req, reply) => {
     queryContext: (req.query as { context?: unknown } | undefined)?.context,
     headerContext: req.headers["x-app-context"],
   });
+  const event = parsed.data.event as ProductEventName;
   const metadata = sanitizeEventMetadata(parsed.data.metadata);
 
   app.log.info(
     {
       eventType: "product_event",
       eventId,
-      event: parsed.data.event,
+      event,
       userId: user.id,
       context,
       metadata,
@@ -1634,7 +1759,142 @@ app.post("/events/track", { preHandler: [requireAuth] }, async (req, reply) => {
     "product_event",
   );
 
+  if (PRODUCT_EVENT_RING) {
+    const now = new Date();
+    PRODUCT_EVENT_RING.push({
+      ts: now.toISOString(),
+      dateUtc: toDateStringUtc(now),
+      event,
+      context,
+      userId: user.id,
+      eventId,
+    });
+  }
+
   return reply.send({ ok: true, eventId });
+});
+
+app.get("/debug/funnel/daily", { preHandler: [requireAuth] }, async (req, reply) => {
+  if (isProd) return reply.code(404).send({ error: "not_found" });
+  if (!PRODUCT_EVENT_RING) return reply.code(503).send({ error: "ring_disabled" });
+
+  const q = ((req as any).query ?? {}) as { days?: string };
+  const days = clampInt(Number(q.days ?? "7"), 1, 30);
+
+  const now = new Date();
+  const today = toDateStringUtc(now);
+  const fromDate = utcDateAddDays(today, -(days - 1));
+  const toDate = today;
+  const events = PRODUCT_EVENT_RING.toArray();
+
+  const buckets = new Map<string, Map<AppContext, {
+    counts: FunnelCounts;
+    usersByEvent: Record<ProductEventName, Set<string>>;
+  }>>();
+
+  const ensure = (dateUtc: string, context: AppContext) => {
+    let ctxMap = buckets.get(dateUtc);
+    if (!ctxMap) {
+      ctxMap = new Map();
+      buckets.set(dateUtc, ctxMap);
+    }
+    let bucket = ctxMap.get(context);
+    if (!bucket) {
+      bucket = {
+        counts: zeroCounts(),
+        usersByEvent: {
+          visit_home: new Set(),
+          auth_success: new Set(),
+          challenge_started: new Set(),
+          first_save_completed: new Set(),
+          funding_initiated: new Set(),
+          funding_settled: new Set(),
+        },
+      };
+      ctxMap.set(context, bucket);
+    }
+    return bucket;
+  };
+
+  for (const e of events) {
+    if (e.dateUtc < fromDate || e.dateUtc > toDate) continue;
+    const bucket = ensure(e.dateUtc, e.context);
+    bucket.counts[e.event] += 1;
+    bucket.usersByEvent[e.event].add(e.userId);
+  }
+
+  const byDay: FunnelDailyRow[] = [];
+  for (let i = 0; i < days; i++) {
+    const dateUtc = utcDateAddDays(fromDate, i);
+    for (const context of ["pwa", "miniapp"] as const) {
+      const ctxMap = buckets.get(dateUtc);
+      const bucket = ctxMap?.get(context);
+      const counts = bucket?.counts ?? zeroCounts();
+      const uniqueUsers = zeroUniqueUsers();
+      if (bucket) {
+        for (const ev of ALL_PRODUCT_EVENTS) uniqueUsers[ev] = bucket.usersByEvent[ev].size;
+      }
+      byDay.push({
+        dateUtc,
+        context,
+        counts,
+        uniqueUsers,
+        conversion: computeConversion(counts),
+      });
+    }
+  }
+
+  const totalsCounts = zeroCounts();
+  const totalsUnique = zeroUniqueUsers();
+  const totalsByContext: Record<AppContext, { counts: FunnelCounts; uniqueUsers: Record<ProductEventName, number> }> = {
+    pwa: { counts: zeroCounts(), uniqueUsers: zeroUniqueUsers() },
+    miniapp: { counts: zeroCounts(), uniqueUsers: zeroUniqueUsers() },
+  };
+  const unionUsers: Record<AppContext, Record<ProductEventName, Set<string>>> = {
+    pwa: {
+      visit_home: new Set(),
+      auth_success: new Set(),
+      challenge_started: new Set(),
+      first_save_completed: new Set(),
+      funding_initiated: new Set(),
+      funding_settled: new Set(),
+    },
+    miniapp: {
+      visit_home: new Set(),
+      auth_success: new Set(),
+      challenge_started: new Set(),
+      first_save_completed: new Set(),
+      funding_initiated: new Set(),
+      funding_settled: new Set(),
+    },
+  };
+
+  for (const e of events) {
+    if (e.dateUtc < fromDate || e.dateUtc > toDate) continue;
+    totalsCounts[e.event] += 1;
+    totalsByContext[e.context].counts[e.event] += 1;
+    unionUsers[e.context][e.event].add(e.userId);
+  }
+
+  for (const ctx of ["pwa", "miniapp"] as const) {
+    for (const ev of ALL_PRODUCT_EVENTS) {
+      const u = unionUsers[ctx][ev].size;
+      totalsByContext[ctx].uniqueUsers[ev] = u;
+      totalsUnique[ev] += u;
+    }
+  }
+
+  return reply.header("Cache-Control", "no-store").send({
+    window: { days, fromDateUtc: fromDate, toDateUtc: toDate },
+    ringSize: PRODUCT_EVENT_RING.size(),
+    byDay,
+    totals: {
+      counts: totalsCounts,
+      uniqueUsers: totalsUnique,
+      conversion: computeConversion(totalsCounts),
+      byContext: totalsByContext,
+    },
+  });
 });
 
 app.get("/push/vapid-public", async (_req, reply) => {
