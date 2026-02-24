@@ -2,25 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { api, type ChallengeLimits, type FeatureActions } from "@/lib/api";
+import Link from "next/link";
+import {
+  api,
+  type ChallengeLimits,
+  type EnvelopeCadence,
+  type EnvelopeOrder,
+} from "@/lib/api";
 import { setUserId as saveUserId } from "@/lib/session";
-
-const DEFAULT_ACTIONS: FeatureActions = {
-  canFund: false,
-  preferredFundingRail: "MANUAL_REFRESH_ONLY",
-  canWithdrawToWallet: false,
-  canWithdrawToBank: false,
-  canDiceTwoDice: false,
-  canDiceMultiplier10: false,
-  canDiceChooseSides: false,
-  canEnvelopesTwoPerDay: false,
-  canEnvelopesWeeklyCadence: false,
-  canEnvelopesReverseOrder: false,
-  canStreakShield: false,
-  canMakeupSave: false,
-  canPushReminders: false,
-  canWeeklyRecapEmail: false,
-};
 
 const DEFAULT_CHALLENGE_LIMITS: ChallengeLimits = {
   dice: {
@@ -51,7 +40,6 @@ export default function ChallengesPage() {
     settings?: Record<string, unknown>;
     bounds?: { dice?: ChallengeLimits["dice"]; envelopes100?: ChallengeLimits["envelopes100"] };
   }>>([]);
-  const [actions, setActions] = useState<FeatureActions>(DEFAULT_ACTIONS);
   const [limits, setLimits] = useState<{ challenges: ChallengeLimits }>({
     challenges: DEFAULT_CHALLENGE_LIMITS,
   });
@@ -64,7 +52,6 @@ export default function ChallengesPage() {
       api.getConfig(uid),
     ]);
     setActiveChallenges(active.challenges ?? []);
-    setActions((config.actions as FeatureActions) ?? DEFAULT_ACTIONS);
     setLimits({
       challenges: (config.limits as { challenges: ChallengeLimits })?.challenges ?? DEFAULT_CHALLENGE_LIMITS,
     });
@@ -80,13 +67,14 @@ export default function ChallengesPage() {
         setUserId(uid);
         await refreshContext(uid);
         setError(null);
-      } catch (e: any) {
-        if (e?.message === "unauthorized") {
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Failed to initialize user";
+        if (msg === "unauthorized") {
           const returnTo = pathname ? encodeURIComponent(pathname) : "";
           router.replace(returnTo ? `/login?returnTo=${returnTo}` : "/login");
           return;
         }
-        setError(e?.message ?? "Failed to initialize user");
+        setError(msg);
       } finally {
         setLoadingUser(false);
       }
@@ -109,8 +97,9 @@ export default function ChallengesPage() {
         localStorage.setItem("focusEventId", res.primedEventId);
       }
       router.push("/");
-    } catch (e: any) {
-      setStatus(`Error: ${e?.message ?? "Failed to start challenge"}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Failed to start challenge";
+      setStatus(`Error: ${msg}`);
     }
   }
 
@@ -121,8 +110,9 @@ export default function ChallengesPage() {
       await api.runDueChallenges(userId);
       await refreshContext(userId);
       setStatus("Done.");
-    } catch (e: any) {
-      setStatus(`Error: ${e?.message ?? "Failed to run due challenges"}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Failed to run due challenges";
+      setStatus(`Error: ${msg}`);
     }
   }
 
@@ -135,8 +125,9 @@ export default function ChallengesPage() {
           2,
         )}), remaining: ${r.remainingCount}`,
       );
-    } catch (e: any) {
-      setStatus(`Error: ${e?.message ?? "Failed to draw envelope"}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Failed to draw envelope";
+      setStatus(`Error: ${msg}`);
     }
   }
 
@@ -145,8 +136,9 @@ export default function ChallengesPage() {
     try {
       const r = await api.rollDice(activeChallengeId);
       setStatus(`Rolled: ${r.roll ?? "?"} (+$${(r.amountCents / 100).toFixed(2)})`);
-    } catch (e: any) {
-      setStatus(`Error: ${e?.message ?? "Failed to roll dice"}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Failed to roll dice";
+      setStatus(`Error: ${msg}`);
     }
   }
 
@@ -159,8 +151,9 @@ export default function ChallengesPage() {
       await api.updateChallengeSettings(userId, userChallengeId, body);
       await refreshContext(userId);
       setStatus("Settings saved ✅");
-    } catch (e: any) {
-      setStatus(`Error: ${e?.message ?? "Failed to save settings"}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Failed to save settings";
+      setStatus(`Error: ${msg}`);
     }
   }
 
@@ -168,9 +161,9 @@ export default function ChallengesPage() {
     <main className="mx-auto max-w-xl p-6 space-y-6">
       <header>
         <h1 className="text-2xl font-bold">Challenges</h1>
-        <a className="underline text-sm opacity-70" href="/">
+        <Link className="underline text-sm opacity-70" href="/">
           ← Back
-        </a>
+        </Link>
       </header>
 
       <section className="rounded-xl border p-5 space-y-2">
@@ -246,7 +239,7 @@ export default function ChallengesPage() {
           <p className="text-sm opacity-70">No active challenges yet.</p>
         )}
         {activeChallenges.map((ch) => {
-          const s = (ch.settings ?? {}) as any;
+          const s = (ch.settings ?? {}) as Record<string, unknown>;
           const dice = (s.dice ?? {}) as {
             sides?: 6 | 12 | 20 | 100;
             multiDice?: 1 | 2;
@@ -328,8 +321,10 @@ export default function ChallengesPage() {
 
               {ch.templateSlug === "100_envelopes" && (() => {
                 const el = ch.bounds?.envelopes100 ?? limits.challenges.envelopes100;
-                const allowedCadence = el.allowedCadence.length > 0 ? el.allowedCadence : (["daily"] as const);
-                const allowedOrder = el.allowedOrder.length > 0 ? el.allowedOrder : (["random"] as const);
+                const allowedCadence: EnvelopeCadence[] =
+                  el.allowedCadence.length > 0 ? el.allowedCadence : ["daily"];
+                const allowedOrder: EnvelopeOrder[] =
+                  el.allowedOrder.length > 0 ? el.allowedOrder : ["random"];
                 const maxDrawsMax = Math.max(1, el.maxDrawsPerDayMax ?? 1);
                 const drawOptions = Array.from({ length: maxDrawsMax }, (_, i) => (i + 1) as 1 | 2);
                 return (

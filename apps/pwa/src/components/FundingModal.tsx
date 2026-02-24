@@ -1,6 +1,16 @@
 "use client";
 
 import { FundCard } from "@coinbase/onchainkit/fund";
+import type { ComponentType } from "react";
+
+const FundCardCompat = FundCard as unknown as ComponentType<{
+  sessionToken: string;
+  assetSymbol: string;
+  country: string;
+  currency: string;
+  headerText: string;
+  buttonText: string;
+}>;
 
 type Props = {
   open: boolean;
@@ -29,7 +39,7 @@ export function FundingModal({ open, sessionToken, onClose, onAfterFunding }: Pr
           ✕
         </button>
         {sessionToken ? (
-          <FundCard
+          <FundCardCompat
             sessionToken={sessionToken}
             assetSymbol="USDC"
             country="US"

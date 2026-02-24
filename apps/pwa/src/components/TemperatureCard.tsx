@@ -12,8 +12,8 @@ type Card = {
   prompt: string;
   unit: "F" | "C";
   maxAmountCents: number;
-  scale?: number;
-  availableScales?: number[];
+  scale?: 1 | 10;
+  availableScales?: Array<1 | 10>;
 };
 
 type Props = {
@@ -26,7 +26,7 @@ export function TemperatureCard({ card, onDone }: Props) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [scale, setScale] = useState<number>(card.scale ?? 1);
+  const [scale, setScale] = useState<1 | 10>(card.scale ?? 1);
   const [tempInput, setTempInput] = useState("");
 
   async function useGps() {
@@ -64,7 +64,7 @@ export function TemperatureCard({ card, onDone }: Props) {
         setMsg("Saved based on today’s temperature ✅");
       }
       onDone();
-    } catch (e: any) {
+    } catch (e: unknown) {
       setErr(normalizeErr(e));
     } finally {
       setBusy(false);
@@ -84,7 +84,7 @@ export function TemperatureCard({ card, onDone }: Props) {
       if (res?.status === "already_committed") setMsg("Already saved for today ✅");
       else setMsg("Saved ✅");
       onDone();
-    } catch (e: any) {
+    } catch (e: unknown) {
       setErr(normalizeErr(e));
     } finally {
       setBusy(false);
@@ -138,7 +138,7 @@ export function TemperatureCard({ card, onDone }: Props) {
     </section>
   );
 
-  async function updateScale(next: number) {
+  async function updateScale(next: 1 | 10) {
     if (scale === next) return;
     setErr(null);
     setMsg(null);
@@ -151,7 +151,7 @@ export function TemperatureCard({ card, onDone }: Props) {
       );
       setScale(next);
       setMsg(next === 1 ? "Classic scale enabled" : "Lite scale enabled");
-    } catch (e: any) {
+    } catch (e: unknown) {
       setErr(normalizeErr(e));
     } finally {
       setBusy(false);
@@ -197,8 +197,8 @@ function ManualTempInline({
   );
 }
 
-function normalizeErr(e: any) {
-  const msg = e?.message ?? "Something went wrong";
+function normalizeErr(e: unknown) {
+  const msg = e instanceof Error ? e.message : "Something went wrong";
   return typeof msg === "string" ? msg : "Something went wrong";
 }
 

@@ -11,7 +11,7 @@ type Props = {
   onDone: () => void | Promise<void>;
 };
 
-export function DiceCard({ card, actions, onDone }: Props) {
+export function DiceCard({ userId, card, actions, onDone }: Props) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -45,7 +45,7 @@ export function DiceCard({ card, actions, onDone }: Props) {
         setMsg(`You rolled ${rollLabel} — saving $${dollars.toFixed(0)} ✅`);
       }
       onDone();
-    } catch (e: any) {
+    } catch (e: unknown) {
       setErr(normalizeErr(e));
     } finally {
       setBusy(false);
@@ -66,7 +66,7 @@ export function DiceCard({ card, actions, onDone }: Props) {
       });
       setMsg("Dice defaults saved ✅");
       await onDone();
-    } catch (e: any) {
+    } catch (e: unknown) {
       setErr(normalizeErr(e));
     } finally {
       setBusy(false);
@@ -150,7 +150,7 @@ export function DiceCard({ card, actions, onDone }: Props) {
   );
 }
 
-function normalizeErr(e: any) {
-  const msg = e?.message ?? "Something went wrong";
+function normalizeErr(e: unknown) {
+  const msg = e instanceof Error ? e.message : "Something went wrong";
   return typeof msg === "string" ? msg : "Something went wrong";
 }

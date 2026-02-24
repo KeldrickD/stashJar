@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { Suspense, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 function sanitizeReturnTo(value: string | null): string {
@@ -10,7 +10,7 @@ function sanitizeReturnTo(value: string | null): string {
   return trimmed;
 }
 
-export default function AuthSuccessPage() {
+function AuthSuccessContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const returnTo = sanitizeReturnTo(searchParams.get("returnTo"));
@@ -25,5 +25,13 @@ export default function AuthSuccessPage() {
       <p className="text-lg font-medium">You&apos;re signed in ✅</p>
       <p className="text-sm opacity-80">Redirecting…</p>
     </main>
+  );
+}
+
+export default function AuthSuccessPage() {
+  return (
+    <Suspense fallback={<main className="mx-auto max-w-md p-6 text-center">Redirecting…</main>}>
+      <AuthSuccessContent />
+    </Suspense>
   );
 }

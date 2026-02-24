@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { api, getRetryInfo, type FeatureActions, TodayCard, TodayBanner } from "@/lib/api";
-import { getUserId, setUserId as saveUserId, clearUserId } from "@/lib/session";
+import { setUserId as saveUserId, clearUserId } from "@/lib/session";
 import { ApplyMissedSavesBanner } from "@/components/ApplyMissedSavesBanner";
 import { DailyLimitCountdown } from "@/components/DailyLimitCountdown";
 import { FundingCta } from "@/components/FundingCta";
@@ -43,7 +44,7 @@ const DEFAULT_ACTIONS: FeatureActions = {
   canWeeklyRecapEmail: false,
 };
 
-export default function Home() {
+function HomeContent() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -103,54 +104,14 @@ export default function Home() {
     streak?.todayCompleted && sortedCards.length === 0 && !todayBanner && !todayError,
   );
 
-  async function boot() {
-    setStatus("Loading…");
-    try {
-      const me = await api.getMe();
-      const uid = me.userId;
-      saveUserId(uid);
-      setUser(uid);
-      const home = await api.getHome(uid, { context: homeContext });
-      setStashAccountId(home.stashAccountId);
-      setBalanceCents(home.stash?.totalDisplayCents ?? (home as any).stashBalanceCents ?? 0);
-      setFundingEnabled(!!(home as any).funding?.enabled);
-      setWalletReady(!!(home as any).wallet?.ready);
-      setWalletAddress((home as any).wallet?.address ?? null);
-      setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
-      setMaxCreditsPerDayCents((home as any).funding?.limits?.maxCreditsPerDayCents ?? undefined);
-      setFundingUiMode(
-        ((home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined) ?? "fundcard",
-      );
-      setFundingDeeplink((home as any).funding?.ui?.deeplink ?? undefined);
-      setFundingDeeplinkKind((home as any).funding?.ui?.deeplinkKind ?? undefined);
-      setFundingHelperText((home as any).funding?.ui?.helperText ?? undefined);
-      setTier(home.config.tier);
-      setFlags(home.config.flags as Record<string, boolean>);
-      setActions((home.config.actions as FeatureActions) ?? DEFAULT_ACTIONS);
-      setTodayCards(home.today.cards ?? []);
-      setTodayBanner(home.today.banner);
-      setActiveChallenges(home.activeChallenges ?? []);
-      setStreak(home.streak);
-      setPrevTodayCompleted(home.streak.todayCompleted);
-      setTodayError(null);
-      const stored = localStorage.getItem("focusEventId");
-      if (stored) setFocusEventId(stored);
-    } catch {
-      const returnTo = pathname ? encodeURIComponent(pathname) : "";
-      router.replace(returnTo ? `/login?returnTo=${returnTo}` : "/login");
-      return;
-    }
-    setStatus("");
-  }
-
   async function ensureWalletThenRefresh() {
     if (!userId) return;
     setFundingBusy(true);
     try {
       await api.walletProvision(userId);
       await refreshEverything();
-    } catch (e: any) {
-      setToastMsg(e?.message ?? "Wallet setup failed");
+    } catch (e: unknown) {
+      setToastMsg(e instanceof Error ? e.message : "Wallet setup failed");
     } finally {
       setFundingBusy(false);
     }
@@ -169,12 +130,12 @@ export default function Home() {
         clientContext: { source: homeContext, flow, sessionHint: "fund_v1" },
       });
       const status = res?.result?.status ?? null;
-      const created = res?.result?.createdPaymentIntents ?? 0;
-      const deltaCents = res?.accounting?.deltaCents ?? res?.accounting?.unallocatedDeltaCents ?? 0;
+      const created = res?.result?.status === "SETTLED" ? res.result.createdPaymentIntents : 0;
+      const deltaCents = res?.accounting?.deltaCents ?? 0;
       return { status: status ?? undefined, createdPaymentIntents: created, deltaCents };
-    } catch (e: any) {
+    } catch (e: unknown) {
       try {
-        const msg = e?.message;
+        const msg = e instanceof Error ? e.message : "";
         if (typeof msg === "string") {
           const d = JSON.parse(msg) as {
             error?: string;
@@ -186,7 +147,7 @@ export default function Home() {
           }
         }
       } catch {}
-      setToastMsg(e?.message ?? "Refresh failed");
+      setToastMsg(e instanceof Error ? e.message : "Refresh failed");
       return undefined;
     } finally {
       setFundingBusy(false);
@@ -209,8 +170,8 @@ export default function Home() {
       setTodayBanner(res.banner);
       const stored = localStorage.getItem("focusEventId");
       if (stored) setFocusEventId(stored);
-    } catch (err: any) {
-      setTodayError(err?.message ?? "Failed to load today cards");
+    } catch (err: unknown) {
+      setTodayError(err instanceof Error ? err.message : "Failed to load today cards");
     }
   }
 
@@ -240,21 +201,21 @@ export default function Home() {
           const home = await api.getHome(uid!, { context: homeContext });
           if (!alive) return;
           setStashAccountId(home.stashAccountId);
-          setBalanceCents(home.stash?.totalDisplayCents ?? (home as any).stashBalanceCents ?? 0);
-          setFundingEnabled(!!(home as any).funding?.enabled);
-          setWalletReady(!!(home as any).wallet?.ready);
-          setWalletAddress((home as any).wallet?.address ?? null);
-          setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
-          setMaxCreditsPerDayCents((home as any).funding?.limits?.maxCreditsPerDayCents ?? undefined);
+          setBalanceCents(home.stash?.totalDisplayCents ?? 0);
+          setFundingEnabled(!!home.funding?.enabled);
+          setWalletReady(!!home.wallet?.ready);
+          setWalletAddress(home.wallet?.address ?? null);
+          setLastFundingRefreshAt(home.funding?.lastRefreshAt ?? null);
+          setMaxCreditsPerDayCents(home.funding?.limits?.maxCreditsPerDayCents ?? undefined);
           setFundingUiMode(
-            ((home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined) ?? "fundcard",
+            (home.funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined) ?? "fundcard",
           );
-          setFundingDeeplink((home as any).funding?.ui?.deeplink ?? undefined);
-          setFundingDeeplinkKind((home as any).funding?.ui?.deeplinkKind ?? undefined);
-          setFundingHelperText((home as any).funding?.ui?.helperText ?? undefined);
+          setFundingDeeplink(home.funding?.ui?.deeplink ?? undefined);
+          setFundingDeeplinkKind(home.funding?.ui?.deeplinkKind ?? undefined);
+          setFundingHelperText(home.funding?.ui?.helperText ?? undefined);
           setTier(home.config.tier);
           setFlags(home.config.flags as Record<string, boolean>);
-          setActions((home.config.actions as FeatureActions) ?? DEFAULT_ACTIONS);
+          setActions(home.config.actions ?? DEFAULT_ACTIONS);
           setTodayCards(home.today.cards ?? []);
           setTodayBanner(home.today.banner);
           setActiveChallenges(home.activeChallenges ?? []);
@@ -263,8 +224,8 @@ export default function Home() {
           setTodayError(null);
           const stored = localStorage.getItem("focusEventId");
           if (stored) setFocusEventId(stored);
-        } catch (err: any) {
-          if (alive) setTodayError(err?.message ?? "Failed to load home");
+        } catch (err: unknown) {
+          if (alive) setTodayError(err instanceof Error ? err.message : "Failed to load home");
           if (alive) setTodayCards([]);
           if (alive) setTodayBanner(undefined);
           if (alive) setActiveChallenges([]);
@@ -272,9 +233,9 @@ export default function Home() {
         }
 
         setStatus("");
-      } catch (e: any) {
+      } catch (e: unknown) {
         if (!alive) return;
-        setStatus(e?.message ?? "Failed to load");
+        setStatus(e instanceof Error ? e.message : "Failed to load");
       }
     })();
     return () => {
@@ -344,21 +305,21 @@ export default function Home() {
     try {
       const home = await api.getHome(uid, { context: homeContext });
       setStashAccountId(home.stashAccountId);
-      setBalanceCents(home.stash?.totalDisplayCents ?? (home as any).stashBalanceCents ?? 0);
-      setFundingEnabled(!!(home as any).funding?.enabled);
-      setWalletReady(!!(home as any).wallet?.ready);
-      setWalletAddress((home as any).wallet?.address ?? null);
-      setLastFundingRefreshAt((home as any).funding?.lastRefreshAt ?? null);
-      setMaxCreditsPerDayCents((home as any).funding?.limits?.maxCreditsPerDayCents ?? undefined);
+      setBalanceCents(home.stash?.totalDisplayCents ?? 0);
+      setFundingEnabled(!!home.funding?.enabled);
+      setWalletReady(!!home.wallet?.ready);
+      setWalletAddress(home.wallet?.address ?? null);
+      setLastFundingRefreshAt(home.funding?.lastRefreshAt ?? null);
+      setMaxCreditsPerDayCents(home.funding?.limits?.maxCreditsPerDayCents ?? undefined);
       setFundingUiMode(
-        ((home as any).funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined) ?? "fundcard",
+        (home.funding?.ui?.mode as "fundcard" | "open_in_wallet" | undefined) ?? "fundcard",
       );
-      setFundingDeeplink((home as any).funding?.ui?.deeplink ?? undefined);
-      setFundingDeeplinkKind((home as any).funding?.ui?.deeplinkKind ?? undefined);
-      setFundingHelperText((home as any).funding?.ui?.helperText ?? undefined);
+      setFundingDeeplink(home.funding?.ui?.deeplink ?? undefined);
+      setFundingDeeplinkKind(home.funding?.ui?.deeplinkKind ?? undefined);
+      setFundingHelperText(home.funding?.ui?.helperText ?? undefined);
       setTier(home.config.tier);
       setFlags(home.config.flags as Record<string, boolean>);
-      setActions((home.config.actions as FeatureActions) ?? DEFAULT_ACTIONS);
+      setActions(home.config.actions ?? DEFAULT_ACTIONS);
       setTodayCards(home.today.cards ?? []);
       setTodayBanner(home.today.banner);
       setActiveChallenges(home.activeChallenges ?? []);
@@ -399,9 +360,9 @@ export default function Home() {
       const retry = getRetryInfo(e);
       if (retry?.kind === "daily_limit") {
         setWithdrawDailyLimitNextAllowedAt(retry.nextAllowedAt ?? null);
-        setToast("Withdraw daily limit reached.");
+        setToastMsg("Withdraw daily limit reached.");
       } else {
-        setToast((e as Error)?.message ?? "Withdraw failed");
+        setToastMsg(e instanceof Error ? e.message : "Withdraw failed");
       }
       setStatus("");
     }
@@ -445,7 +406,7 @@ export default function Home() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [actions.preferredFundingRail, fundingEnabled, walletReady, userId]);
+  }, [actions.preferredFundingRail, fundingEnabled, walletReady, userId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <main className="mx-auto max-w-xl p-6 space-y-6">
@@ -547,12 +508,12 @@ export default function Home() {
             </p>
           )}
           <div className="flex flex-wrap gap-3 pt-1">
-            <a className="underline text-sm font-medium" href="/history">
+            <Link className="underline text-sm font-medium" href="/history">
               View activity
-            </a>
-            <a className="underline text-sm font-medium" href="/challenges">
+            </Link>
+            <Link className="underline text-sm font-medium" href="/challenges">
               Challenges
-            </a>
+            </Link>
           </div>
         </section>
       )}
@@ -560,9 +521,16 @@ export default function Home() {
       {userId &&
         !doneForToday &&
         sortedCards.map((card, index) => {
-          const eventId = (card as any).eventId;
-          const userChallengeId = (card as any).userChallengeId;
-          const key = `${card.type}_${eventId ?? userChallengeId ?? card.scheduledFor ?? index}`;
+          const eventId = "eventId" in card && typeof card.eventId === "string" ? card.eventId : undefined;
+          const userChallengeId =
+            "userChallengeId" in card && typeof card.userChallengeId === "string"
+              ? card.userChallengeId
+              : undefined;
+          const scheduledFor =
+            "scheduledFor" in card && typeof card.scheduledFor === "string"
+              ? card.scheduledFor
+              : undefined;
+          const key = `${card.type}_${eventId ?? userChallengeId ?? scheduledFor ?? index}`;
           const id = eventId ? `card_${eventId}` : undefined;
           const highlightByEvent =
             focusEventId && eventId && focusEventId === eventId
@@ -636,21 +604,21 @@ export default function Home() {
               </span>
             ))}
           </div>
-          <a href="/challenges" className="inline-block underline">
+          <Link href="/challenges" className="inline-block underline">
             Manage challenges →
-          </a>
+          </Link>
         </section>
       )}
 
       <section className="rounded-xl border p-5 space-y-3">
         <h2 className="text-xl font-semibold">Challenges</h2>
         <div className="grid grid-cols-1 gap-2">
-          <a className="underline" href="/challenges">
+          <Link className="underline" href="/challenges">
             Go to Challenges
-          </a>
-          <a className="underline" href="/history">
+          </Link>
+          <Link className="underline" href="/history">
             View History
-          </a>
+          </Link>
         </div>
       </section>
 
@@ -677,5 +645,13 @@ export default function Home() {
         )}
       </footer>
     </main>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense fallback={<main className="mx-auto max-w-xl p-6">Loading…</main>}>
+      <HomeContent />
+    </Suspense>
   );
 }

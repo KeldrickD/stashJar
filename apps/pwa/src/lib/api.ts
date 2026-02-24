@@ -1,6 +1,6 @@
 const API = process.env.NEXT_PUBLIC_API_BASE!;
 
-const fetchOpts = (method: string, body?: any): RequestInit => ({
+const fetchOpts = (method: string, body?: unknown): RequestInit => ({
   method,
   headers: { "Content-Type": "application/json" },
   body: body ? JSON.stringify(body) : undefined,
@@ -8,11 +8,11 @@ const fetchOpts = (method: string, body?: any): RequestInit => ({
   credentials: "include",
 });
 
-async function req<T>(method: string, path: string, body?: any): Promise<T> {
+async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${API}${path}`, fetchOpts(method, body));
 
   const text = await res.text();
-  let data: any;
+  let data: unknown;
   try {
     data = JSON.parse(text);
   } catch {
@@ -196,7 +196,7 @@ export type TodayCard =
       cadence?: "daily" | "weekly";
       order?: "random" | "reverse";
     }
-  | { type: string; [k: string]: any };
+  | { type: string; [k: string]: unknown };
 
 export type DiceTodayCard = Extract<TodayCard, { type: "dice_daily" }>;
 export type EnvelopesTodayCard = Extract<TodayCard, { type: "envelopes_100" }>;
@@ -218,8 +218,7 @@ export type TodayBanner =
       type: "waiting_for_funds";
       message: string;
       lastRefreshAt?: string;
-    }
-  | { type: string; [k: string]: any };
+    };
 
 export type TodayResponse = {
   userId: string;
@@ -233,6 +232,8 @@ export type Tier = "NORMIE" | "CURIOUS" | "POWER" | "DEV";
 export type FundingUiMode = "fundcard" | "open_in_wallet";
 export type FundingDeeplinkKind = "env" | "generated" | "none";
 export type FundingRail = "FUND_CARD" | "OPEN_IN_WALLET" | "MANUAL_REFRESH_ONLY";
+export type EnvelopeCadence = "daily" | "weekly";
+export type EnvelopeOrder = "random" | "reverse";
 
 export type FeatureActions = {
   canFund: boolean;
@@ -259,8 +260,8 @@ export type ChallengeLimits = {
     maxSides?: number;
   };
   envelopes100: {
-    allowedCadence: ("daily" | "weekly")[];
-    allowedOrder: ("random" | "reverse")[];
+    allowedCadence: EnvelopeCadence[];
+    allowedOrder: EnvelopeOrder[];
     maxDrawsPerDayMax: number;
     maxDrawsPerWeekMax?: number;
   };
@@ -299,8 +300,8 @@ export type PatchUserChallengeSettingsBody = {
     multiplier?: 1 | 10;
   };
   envelopes?: {
-    cadence?: "daily" | "weekly";
-    order?: "random" | "reverse";
+    cadence?: EnvelopeCadence;
+    order?: EnvelopeOrder;
     maxDrawsPerDay?: 1 | 2;
   };
 };
@@ -311,6 +312,36 @@ export type PatchUserChallengeSettingsResponse = {
   templateSlug: string | null;
   settings: Record<string, unknown>;
   updatedAt: string;
+};
+
+export type DrawEnvelopeResult = {
+  envelope: number;
+  amountCents: number;
+  remainingCount: number;
+  done?: boolean;
+};
+
+export type RollDiceResult = {
+  roll?: number;
+  amountCents: number;
+};
+
+export type RollDiceEventResult = {
+  status?: "already_committed" | "saved";
+  amountCents?: number;
+  roll?: number;
+  rollBreakdown?: number[];
+  multiplier?: number;
+};
+
+export type SetTemperatureResult = {
+  status?: "already_committed" | "saved";
+  amountCents?: number;
+};
+
+export type SetWeatherChoiceResult = {
+  status?: "already_committed" | "saved";
+  amountCents?: number;
 };
 
 export type AuthMe = {
@@ -328,7 +359,7 @@ export const api = {
     const res = await fetch(`${API}/auth/me`, fetchOpts("GET"));
     if (res.status === 401) throw new Error("unauthorized");
     const text = await res.text();
-    let data: any;
+    let data: unknown;
     try {
       data = JSON.parse(text);
     } catch {
@@ -342,7 +373,7 @@ export const api = {
 
   createUser: () => req<{ userId: string }>("POST", "/users", {}),
 
-  getAccounts: (userId: string) => req<any>("GET", `/users/${userId}/accounts`),
+  getAccounts: (userId: string) => req<unknown>("GET", `/users/${userId}/accounts`),
 
   getBalance: (accountId: string) =>
     req<{ balanceCents: number }>("GET", `/ledger/accounts/${accountId}/balance`),
@@ -361,7 +392,7 @@ export const api = {
   startChallenge: (input: {
     userId: string;
     templateSlug: string;
-    settings?: Record<string, any>;
+    settings?: Record<string, unknown>;
     primeToday?: boolean;
   }) =>
     req<{ userChallengeId: string; nextRunAt?: string; primedEventId?: string }>(
@@ -376,32 +407,32 @@ export const api = {
     ),
 
   runDueChallenges: (userId: string) =>
-    req<any>("POST", `/users/${userId}/challenges/run-due`, {}),
+    req<unknown>("POST", `/users/${userId}/challenges/run-due`, {}),
 
   drawEnvelope: (challengeId: string) =>
-    req<any>("POST", `/challenges/${challengeId}/draw`, {}),
+    req<DrawEnvelopeResult>("POST", `/challenges/${challengeId}/draw`, {}),
 
-  rollDice: (challengeId: string) => req<any>("POST", `/challenges/${challengeId}/roll`, {}),
+  rollDice: (challengeId: string) => req<RollDiceResult>("POST", `/challenges/${challengeId}/roll`, {}),
 
   createDeposit: (userId: string, amountCents: number) =>
-    req<any>("POST", "/payments/deposits", {
+    req<{ id: string; paymentIntent?: { id: string } }>("POST", "/payments/deposits", {
       userId,
       amountCents,
       idempotencyKey: `pwa_dep_${Date.now()}_${Math.random().toString(16).slice(2)}`,
     }),
 
   settleDeposit: (paymentIntentId: string) =>
-    req<any>("POST", "/webhooks/deposits/settled", { paymentIntentId }),
+    req<unknown>("POST", "/webhooks/deposits/settled", { paymentIntentId }),
 
   requestWithdraw: (userId: string, amountCents: number) =>
-    req<any>("POST", "/payments/withdrawals", {
+    req<{ id: string }>("POST", "/payments/withdrawals", {
       userId,
       amountCents,
       idempotencyKey: `pwa_wd_${Date.now()}_${Math.random().toString(16).slice(2)}`,
     }),
 
   markWithdrawPaid: (paymentIntentId: string) =>
-    req<any>("POST", "/webhooks/withdrawals/paid", { paymentIntentId }),
+    req<unknown>("POST", "/webhooks/withdrawals/paid", { paymentIntentId }),
 
   getTodayCards: (userId: string) =>
     req<TodayResponse>("GET", `/users/${userId}/challenges/today`),
@@ -528,7 +559,7 @@ export const api = {
     }>("GET", `/users/${userId}/streak`),
 
   setWeatherChoice: (challengeId: string, eventId: string, choice: string) =>
-    req<any>("POST", `/challenges/${challengeId}/events/${eventId}/set-weather`, { choice }),
+    req<SetWeatherChoiceResult>("POST", `/challenges/${challengeId}/events/${eventId}/set-weather`, { choice }),
 
   setTemperature: (
     challengeId: string,
@@ -537,7 +568,7 @@ export const api = {
       | { mode: "manual"; temp: number; unit?: "F" | "C" }
       | { mode: "gps"; lat: number; lon: number; unit?: "F" | "C" }
       | { mode: "place"; zip?: string; query?: string; unit?: "F" | "C" },
-  ) => req<any>("POST", `/challenges/${challengeId}/events/${eventId}/set-temperature`, body),
+  ) => req<SetTemperatureResult>("POST", `/challenges/${challengeId}/events/${eventId}/set-temperature`, body),
 
   updateChallengeSettings: (
     userId: string,
@@ -555,10 +586,14 @@ export const api = {
     eventId: string,
     body?: { sides?: 6 | 12 | 20 | 100; multiDice?: 1 | 2; multiplier?: 1 | 10 },
   ) =>
-    req<any>("POST", `/challenges/${challengeId}/events/${eventId}/roll`, body ?? {}),
+    req<RollDiceEventResult>("POST", `/challenges/${challengeId}/events/${eventId}/roll`, body ?? {}),
 
   commitPending: (userId: string, limit = 200) =>
-    req<any>("POST", `/users/${userId}/challenges/commit-pending?limit=${limit}`, {}),
+    req<{ committedCents?: number; perRunCapHit?: boolean; skippedCapCount?: number }>(
+      "POST",
+      `/users/${userId}/challenges/commit-pending?limit=${limit}`,
+      {},
+    ),
 
   getVapidPublicKey: () =>
     fetch(`${API}/push/vapid-public`, { credentials: "include" }).then(async (r) => {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 
@@ -11,7 +11,7 @@ function sanitizeReturnTo(value: string | null): string | null {
   return trimmed;
 }
 
-export default function LoginPage() {
+function LoginContent() {
   const searchParams = useSearchParams();
   const returnTo = sanitizeReturnTo(searchParams.get("returnTo"));
   const [email, setEmail] = useState("");
@@ -28,8 +28,8 @@ export default function LoginPage() {
     try {
       await api.startAuth(trimmed, returnTo);
       setSent(true);
-    } catch (err: any) {
-      setError(err?.message ?? "Something went wrong. Try again.");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Something went wrong. Try again.");
     } finally {
       setLoading(false);
     }
@@ -81,5 +81,13 @@ export default function LoginPage() {
         </p>
       )}
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={<main className="mx-auto max-w-md p-6">Loading…</main>}>
+      <LoginContent />
+    </Suspense>
   );
 }

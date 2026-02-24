@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { api, getRetryInfo } from "@/lib/api";
 import { DailyLimitCountdown } from "./DailyLimitCountdown";
 import { FundingModal } from "./FundingModal";
@@ -33,7 +34,11 @@ type Props = {
   lastRefreshAt: string | null | undefined;
   busy: boolean;
   onSetUpWallet: () => void;
-  onAddMoney: () => Promise<{ status?: string; createdPaymentIntents?: number; deltaCents?: number } | void>;
+  onAddMoney: () => Promise<
+    { status?: string; createdPaymentIntents?: number; deltaCents?: number }
+    | { error: "daily_limit"; retryAfterSeconds: number; nextAllowedAt: string }
+    | void
+  >;
   onRefreshHome: () => void;
   walletReady: boolean;
   setToast: (msg: string) => void;
@@ -42,13 +47,11 @@ type Props = {
 };
 
 export function FundingCta({
-  walletAddress,
   enabled,
   preferredFundingRail,
   context = "pwa",
   uiMode = "fundcard",
   deeplink,
-  deeplinkKind,
   helperText,
   lastRefreshAt,
   busy,
@@ -69,7 +72,6 @@ export function FundingCta({
 
   useEffect(() => {
     if (!polling || pollUntil.current <= Date.now()) {
-      setPolling(false);
       if (pollTimer.current) {
         clearInterval(pollTimer.current);
         pollTimer.current = null;
@@ -97,12 +99,12 @@ export function FundingCta({
         setDailyLimitNextAllowedAt(result.nextAllowedAt ?? null);
         return;
       }
-      if (result?.status === "SETTLED" && (result?.createdPaymentIntents ?? 0) > 0) {
+      if (result && !("error" in result) && result.status === "SETTLED" && (result.createdPaymentIntents ?? 0) > 0) {
         setPolling(false);
         if (pollTimer.current) clearInterval(pollTimer.current);
         pollTimer.current = null;
         onRefreshHome();
-        const cents = result?.deltaCents ?? 0;
+        const cents = result.deltaCents ?? 0;
         setToast(cents > 0 ? `Added $${(cents / 100).toFixed(2)} ✅` : "Added ✅");
       }
     };
@@ -126,21 +128,21 @@ export function FundingCta({
         return;
       }
       onRefreshHome();
-      if (result?.status === "SETTLED" && (result?.createdPaymentIntents ?? 0) > 0) {
-        const cents = result?.deltaCents ?? 0;
+      if (result && !("error" in result) && result.status === "SETTLED" && (result.createdPaymentIntents ?? 0) > 0) {
+        const cents = result.deltaCents ?? 0;
         setToast(cents > 0 ? `Added $${(cents / 100).toFixed(2)} ✅` : "Added ✅");
-      } else if (result?.status === "NO_CHANGE") {
+      } else if (result && !("error" in result) && result.status === "NO_CHANGE") {
         setToast("Nothing new yet — try again in a moment.");
         setPolling(true);
         pollUntil.current = Date.now() + POLL_MAX_DURATION_MS;
       }
-    } catch (e) {
+    } catch (e: unknown) {
       const retry = getRetryInfo(e);
       if (retry?.kind === "daily_limit") {
         setToast("Daily limit reached — resets at midnight UTC");
         setDailyLimitNextAllowedAt(retry.nextAllowedAt ?? null);
       } else {
-        setToast((e as Error)?.message ?? "Refresh failed");
+        setToast(e instanceof Error ? e.message : "Refresh failed");
       }
     }
   };
@@ -167,7 +169,7 @@ export function FundingCta({
         setSessionLoading(false);
         return;
       }
-    } catch (e) {
+    } catch (e: unknown) {
       const retry = getRetryInfo(e);
       if (retry?.kind === "daily_limit") {
         setToast("Daily add limit reached — resets at midnight UTC");
@@ -212,9 +214,9 @@ export function FundingCta({
         <p className="text-sm opacity-70">
           {preferredFundingRail === "MANUAL_REFRESH_ONLY" ? "Funding not available right now." : "Funding not available right now."}
         </p>
-        <a href="/history" className="rounded border border-black px-4 py-2 font-medium inline-block">
+        <Link href="/history" className="rounded border border-black px-4 py-2 font-medium inline-block">
           Withdraw
-        </a>
+        </Link>
       </section>
     );
   }
@@ -236,9 +238,9 @@ export function FundingCta({
         >
           {sessionLoading ? "Opening…" : busy ? "Refreshing…" : polling ? "Checking…" : "Add money"}
         </button>
-        <a href="/history" className="rounded border border-black px-4 py-2 font-medium inline-block">
+        <Link href="/history" className="rounded border border-black px-4 py-2 font-medium inline-block">
           Withdraw
-        </a>
+        </Link>
       </div>
       {polling && (
         <p className="text-sm text-amber-700">Waiting for funds… We’ll check again in a few seconds.</p>

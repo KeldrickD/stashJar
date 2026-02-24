@@ -41,9 +41,10 @@ export function ApplyMissedSavesBanner({ userId, banner, onDone }: Props) {
     setBusy(true);
     try {
       const res = await api.commitPending(userId, 200);
-      if (res?.committedCents > 0) {
-        const dollars = (res.committedCents / 100).toFixed(2);
-        if (res?.perRunCapHit || res?.skippedCapCount > 0) {
+      const committedCents = res?.committedCents ?? 0;
+      if (committedCents > 0) {
+        const dollars = (committedCents / 100).toFixed(2);
+        if (res?.perRunCapHit || (res?.skippedCapCount ?? 0) > 0) {
           setMsg(`Applied $${dollars} ✅ More will apply tomorrow.`);
         } else {
           setMsg(`Applied $${dollars} ✅`);
@@ -52,7 +53,7 @@ export function ApplyMissedSavesBanner({ userId, banner, onDone }: Props) {
         setMsg("You’re at today’s cap — more will apply tomorrow.");
       }
       onDone();
-    } catch (e: any) {
+    } catch (e: unknown) {
       setErr(normalizeErr(e));
     } finally {
       setBusy(false);
@@ -79,7 +80,7 @@ export function ApplyMissedSavesBanner({ userId, banner, onDone }: Props) {
   );
 }
 
-function normalizeErr(e: any) {
-  const msg = e?.message ?? "Something went wrong";
+function normalizeErr(e: unknown) {
+  const msg = e instanceof Error ? e.message : "Something went wrong";
   return typeof msg === "string" ? msg : "Something went wrong";
 }

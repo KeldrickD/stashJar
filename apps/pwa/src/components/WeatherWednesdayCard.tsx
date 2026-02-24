@@ -62,7 +62,7 @@ export function WeatherWednesdayCard({ card, onDone }: Props) {
         setMsg("Saved based on today’s temperature ✅");
       }
       onDone();
-    } catch (e: any) {
+    } catch (e: unknown) {
       setErr(normalizeErr(e));
     } finally {
       setBusy(false);
@@ -78,7 +78,7 @@ export function WeatherWednesdayCard({ card, onDone }: Props) {
       if (res?.status === "already_committed") setMsg("Already saved for today ✅");
       else setMsg(`Saved ✅ (${choice})`);
       onDone();
-    } catch (e: any) {
+    } catch (e: unknown) {
       setErr(normalizeErr(e));
     } finally {
       setBusy(false);
@@ -98,7 +98,7 @@ export function WeatherWednesdayCard({ card, onDone }: Props) {
       if (res?.status === "already_committed") setMsg("Already saved for today ✅");
       else setMsg("Saved ✅");
       onDone();
-    } catch (e: any) {
+    } catch (e: unknown) {
       setErr(normalizeErr(e));
     } finally {
       setBusy(false);
@@ -175,7 +175,7 @@ function ManualTempInline({
   );
 }
 
-function normalizeErr(e: any) {
-  const msg = e?.message ?? "Something went wrong";
+function normalizeErr(e: unknown) {
+  const msg = e instanceof Error ? e.message : "Something went wrong";
   return typeof msg === "string" ? msg : "Something went wrong";
 }
