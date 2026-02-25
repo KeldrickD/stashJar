@@ -3,6 +3,9 @@
 import { useState } from "react";
 import { api } from "@/lib/api";
 import type { EnvelopesTodayCard, FeatureActions } from "@/lib/api";
+import { StashCard } from "@/components/StashCard";
+import { StashCardHeader } from "@/components/StashCardHeader";
+import { PowerBadge, TodayBadge } from "@/components/Badges";
 
 type Props = {
   userId: string;
@@ -80,31 +83,36 @@ export function EnvelopesCard({ userId, card, actions, onDone }: Props) {
   }
 
   return (
-    <section className="rounded-xl border p-5 space-y-3">
-      <div className="text-lg font-semibold">{card.title}</div>
-      <div className="text-sm opacity-70">{card.prompt}</div>
+    <StashCard variant="soft" className="sj-appear">
+      <StashCardHeader
+        icon="✉️"
+        title={card.title}
+        subtitle={card.prompt}
+        badge={<TodayBadge />}
+        right={canConfigure ? <PowerBadge /> : null}
+      />
 
-      <div className="flex flex-wrap gap-2 text-xs opacity-70">
+      <div className="mt-4 flex flex-wrap gap-2 text-xs sj-text-muted">
         {actions.canEnvelopesTwoPerDay && (
-          <span className="rounded border px-2 py-1">
+          <span className="sj-badge sj-badge-brand">
             Max draws/day: {card.maxDrawsPerDay ?? 1}
           </span>
         )}
         {actions.canEnvelopesWeeklyCadence && card.cadence && (
-          <span className="rounded border px-2 py-1">
+          <span className="sj-badge sj-badge-brand">
             Cadence: {card.cadence}
           </span>
         )}
         {actions.canEnvelopesReverseOrder && card.order && (
-          <span className="rounded border px-2 py-1">
+          <span className="sj-badge sj-badge-brand">
             Order: {card.order}
           </span>
         )}
       </div>
 
       {canConfigure && (
-        <div className="space-y-2 rounded border p-3">
-          <div className="text-xs font-medium opacity-70">Settings</div>
+        <div className="sj-panel mt-4 space-y-2">
+          <div className="text-xs font-medium sj-text-muted">Settings</div>
           <div className="flex flex-wrap gap-2">
             {actions.canEnvelopesWeeklyCadence && (
               <>
@@ -112,7 +120,7 @@ export function EnvelopesCard({ userId, card, actions, onDone }: Props) {
                   type="button"
                   disabled={busy}
                   onClick={() => setCadence("daily")}
-                  className={`rounded border px-3 py-1.5 text-xs ${cadence === "daily" ? "bg-black text-white" : ""}`}
+                  className={`sj-toggle-btn ${cadence === "daily" ? "sj-toggle-btn-active" : ""}`}
                 >
                   Daily
                 </button>
@@ -120,7 +128,7 @@ export function EnvelopesCard({ userId, card, actions, onDone }: Props) {
                   type="button"
                   disabled={busy}
                   onClick={() => setCadence("weekly")}
-                  className={`rounded border px-3 py-1.5 text-xs ${cadence === "weekly" ? "bg-black text-white" : ""}`}
+                  className={`sj-toggle-btn ${cadence === "weekly" ? "sj-toggle-btn-active" : ""}`}
                 >
                   Weekly
                 </button>
@@ -132,7 +140,7 @@ export function EnvelopesCard({ userId, card, actions, onDone }: Props) {
                   type="button"
                   disabled={busy}
                   onClick={() => setOrder("random")}
-                  className={`rounded border px-3 py-1.5 text-xs ${order === "random" ? "bg-black text-white" : ""}`}
+                  className={`sj-toggle-btn ${order === "random" ? "sj-toggle-btn-active" : ""}`}
                 >
                   Random
                 </button>
@@ -140,7 +148,7 @@ export function EnvelopesCard({ userId, card, actions, onDone }: Props) {
                   type="button"
                   disabled={busy}
                   onClick={() => setOrder("reverse")}
-                  className={`rounded border px-3 py-1.5 text-xs ${order === "reverse" ? "bg-black text-white" : ""}`}
+                  className={`sj-toggle-btn ${order === "reverse" ? "sj-toggle-btn-active" : ""}`}
                 >
                   Reverse
                 </button>
@@ -152,7 +160,7 @@ export function EnvelopesCard({ userId, card, actions, onDone }: Props) {
                   type="button"
                   disabled={busy}
                   onClick={() => setMaxDrawsPerDay(1)}
-                  className={`rounded border px-3 py-1.5 text-xs ${maxDrawsPerDay === 1 ? "bg-black text-white" : ""}`}
+                  className={`sj-toggle-btn ${maxDrawsPerDay === 1 ? "sj-toggle-btn-active" : ""}`}
                 >
                   1/day
                 </button>
@@ -160,7 +168,7 @@ export function EnvelopesCard({ userId, card, actions, onDone }: Props) {
                   type="button"
                   disabled={busy}
                   onClick={() => setMaxDrawsPerDay(2)}
-                  className={`rounded border px-3 py-1.5 text-xs ${maxDrawsPerDay === 2 ? "bg-black text-white" : ""}`}
+                  className={`sj-toggle-btn ${maxDrawsPerDay === 2 ? "sj-toggle-btn-active" : ""}`}
                 >
                   2/day
                 </button>
@@ -170,7 +178,7 @@ export function EnvelopesCard({ userId, card, actions, onDone }: Props) {
               type="button"
               disabled={busy}
               onClick={saveSettings}
-              className="rounded border px-3 py-1.5 text-xs font-medium"
+              className="sj-btn sj-btn-secondary px-3 py-1.5 text-xs font-medium"
             >
               Save
             </button>
@@ -178,12 +186,9 @@ export function EnvelopesCard({ userId, card, actions, onDone }: Props) {
         </div>
       )}
 
-      <div className="flex items-center gap-2">
-        <div className="flex-1 h-2 rounded-full bg-black/10 overflow-hidden">
-          <div
-            className="h-full bg-black rounded-full transition-all"
-            style={{ width: `${pct}%` }}
-          />
+      <div className="mt-4 flex items-center gap-2">
+        <div className="sj-progress-track">
+          <div className="sj-progress-fill" style={{ width: `${pct}%` }} />
         </div>
         <span className="text-sm tabular-nums">
           {complete}/{total}
@@ -191,7 +196,7 @@ export function EnvelopesCard({ userId, card, actions, onDone }: Props) {
       </div>
 
       {card.drewToday ? (
-        <div className="text-sm text-green-700">
+        <div className="text-sm text-emerald-700">
           Already drew today ✅ Come back tomorrow.
         </div>
       ) : (
@@ -199,15 +204,15 @@ export function EnvelopesCard({ userId, card, actions, onDone }: Props) {
           <button
             disabled={busy || card.remainingCount === 0}
             onClick={draw}
-            className="rounded border px-4 py-2 font-medium disabled:opacity-50"
+            className="sj-btn sj-btn-primary px-4 py-2 font-medium disabled:opacity-50"
           >
-            Draw
+            Draw now
           </button>
         </div>
       )}
 
-      {msg && <div className="text-sm">{msg}</div>}
-      {err && <div className="text-sm text-red-600">{err}</div>}
-    </section>
+      {msg && <div className="text-sm mt-2">{msg}</div>}
+      {err && <div className="text-sm text-red-600 mt-2">{err}</div>}
+    </StashCard>
   );
 }

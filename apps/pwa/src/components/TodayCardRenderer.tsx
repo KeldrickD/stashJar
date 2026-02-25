@@ -4,6 +4,8 @@ import { WeatherWednesdayCard } from "@/components/WeatherWednesdayCard";
 import { TemperatureCard } from "@/components/TemperatureCard";
 import { DiceCard } from "@/components/DiceCard";
 import { EnvelopesCard } from "@/components/EnvelopesCard";
+import { StashCard } from "@/components/StashCard";
+import { StashCardHeader } from "@/components/StashCardHeader";
 import type { FeatureActions, TodayCard } from "@/lib/api";
 
 type Props = {
@@ -34,12 +36,13 @@ export function TodayCardRenderer({ userId, card, actions, onDone }: Props) {
       return <EnvelopesCard userId={userId} card={card as Extract<TodayCard, { type: "envelopes_100" }>} actions={actions} onDone={onDone} />;
     default:
       return (
-        <section className="rounded-xl border p-5 space-y-2">
-          <div className="text-lg font-semibold">New challenge</div>
-          <div className="text-sm opacity-70">
+        <StashCard variant="soft">
+          <StashCardHeader icon="✨" title="New challenge" subtitle={
+            <>
             Unsupported card type: <code>{card.type}</code>
-          </div>
-        </section>
+            </>
+          } />
+        </StashCard>
       );
   }
 }

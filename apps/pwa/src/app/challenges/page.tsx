@@ -26,6 +26,15 @@ const DEFAULT_CHALLENGE_LIMITS: ChallengeLimits = {
   },
 };
 
+function challengeIcon(slug: string | null): string {
+  if (slug === "temperature_daily") return "🌡️";
+  if (slug === "dice_daily" || slug === "dice") return "🎲";
+  if (slug === "weather_wednesday") return "🌦️";
+  if (slug === "100_envelopes") return "✉️";
+  if (slug === "52_week") return "📈";
+  return "✨";
+}
+
 export default function ChallengesPage() {
   const router = useRouter();
   const pathname = usePathname();
@@ -167,85 +176,86 @@ export default function ChallengesPage() {
   }
 
   return (
-    <main className="mx-auto max-w-xl p-6 space-y-6">
-      <header>
-        <h1 className="text-2xl font-bold">Challenges</h1>
-        <Link className="underline text-sm opacity-70" href="/">
+    <main className="mx-auto max-w-xl px-4 py-6 space-y-6">
+      <header className="space-y-2">
+        <h1 className="text-3xl font-semibold tracking-tight">Challenges</h1>
+        <p className="text-sm sj-text-muted">Choose your daily saving ritual and tune your defaults.</p>
+        <Link className="sj-link text-sm" href="/">
           ← Back
         </Link>
       </header>
 
-      <section className="rounded-xl border p-5 space-y-2">
-        <h2 className="font-semibold">Start</h2>
-        {loadingUser && <div className="text-sm opacity-70">Loading user…</div>}
+      <section className="sj-card p-5 space-y-3 sj-appear">
+        <h2 className="text-xl font-semibold">Start a challenge</h2>
+        {loadingUser && <div className="text-sm sj-text-muted">Loading user…</div>}
         {error && <div className="text-sm text-red-600">{error}</div>}
-        <div className="flex flex-col gap-2">
+        <div className="grid grid-cols-1 gap-2">
           <button
-            className="rounded bg-black text-white px-4 py-2"
+            className="sj-btn sj-btn-primary px-4 py-2.5 sj-lift text-left"
             onClick={() => start("52_week")}
             disabled={!userId}
           >
-            Start 52-week
+            📈 Start 52-week
           </button>
           <button
-            className="rounded bg-black text-white px-4 py-2"
+            className="sj-btn sj-btn-primary px-4 py-2.5 sj-lift text-left"
             onClick={() => start("weather_wednesday")}
             disabled={!userId}
           >
-            Start Weather Wednesday
+            🌦️ Start Weather Wednesday
           </button>
           <button
-            className="rounded bg-black text-white px-4 py-2"
+            className="sj-btn sj-btn-primary px-4 py-2.5 sj-lift text-left"
             onClick={() => start("temperature_daily")}
             disabled={!userId}
           >
-            Start Temperature Daily
+            🌡️ Start Temperature Daily
           </button>
           <button
-            className="rounded bg-black text-white px-4 py-2"
+            className="sj-btn sj-btn-primary px-4 py-2.5 sj-lift text-left"
             onClick={() => start("dice_daily")}
             disabled={!userId}
           >
-            Start Dice Daily
+            🎲 Start Dice Daily
           </button>
           <button
-            className="rounded bg-black text-white px-4 py-2"
+            className="sj-btn sj-btn-primary px-4 py-2.5 sj-lift text-left"
             onClick={() => start("100_envelopes")}
             disabled={!userId}
           >
-            Start 100 Envelopes
+            ✉️ Start 100 Envelopes
           </button>
           <button
-            className="rounded bg-black text-white px-4 py-2"
+            className="sj-btn sj-btn-primary px-4 py-2.5 sj-lift text-left"
             onClick={() => start("dice")}
             disabled={!userId}
           >
-            Start dice
+            🎲 Start Dice
           </button>
         </div>
       </section>
 
-      <section className="rounded-xl border p-5 space-y-2">
-        <h2 className="font-semibold">Actions</h2>
+      <section className="sj-card-solid p-5 space-y-3">
+        <h2 className="text-xl font-semibold">Quick actions</h2>
         <div className="flex gap-2 flex-wrap">
-          <button className="rounded border px-4 py-2" onClick={runDue} disabled={!userId}>
+          <button className="sj-btn sj-btn-secondary px-4 py-2" onClick={runDue} disabled={!userId}>
             Run due (52-week)
           </button>
-          <button className="rounded border px-4 py-2" onClick={draw} disabled={!activeChallengeId}>
+          <button className="sj-btn sj-btn-secondary px-4 py-2" onClick={draw} disabled={!activeChallengeId}>
             Draw envelope
           </button>
-          <button className="rounded border px-4 py-2" onClick={roll} disabled={!activeChallengeId}>
+          <button className="sj-btn sj-btn-secondary px-4 py-2" onClick={roll} disabled={!activeChallengeId}>
             Roll dice
           </button>
         </div>
-        <div className="text-sm opacity-70 break-words">{status}</div>
-        <div className="text-xs opacity-60">Active challenge: {activeChallengeId || "none"}</div>
+        <div className="text-sm sj-text-muted break-words">{status}</div>
+        <div className="text-xs sj-text-faint">Active challenge: {activeChallengeId || "none"}</div>
       </section>
 
-      <section className="rounded-xl border p-5 space-y-4">
-        <h2 className="font-semibold">Challenge Settings</h2>
+      <section className="sj-card p-5 space-y-4">
+        <h2 className="text-xl font-semibold">Challenge settings</h2>
         {activeChallenges.length === 0 && (
-          <p className="text-sm opacity-70">No active challenges yet.</p>
+          <p className="text-sm sj-text-muted">No active challenges yet.</p>
         )}
         {activeChallenges.map((ch) => {
           const s = (ch.settings ?? {}) as Record<string, unknown>;
@@ -260,9 +270,9 @@ export default function ChallengesPage() {
             maxDrawsPerDay?: 1 | 2;
           };
           return (
-            <div key={ch.userChallengeId} className="rounded border p-3 space-y-2">
+            <div key={ch.userChallengeId} className="sj-card-solid p-4 space-y-3">
               <div className="text-sm font-medium">
-                {ch.name} {ch.progress ? <span className="opacity-70">({ch.progress})</span> : null}
+                {challengeIcon(ch.templateSlug)} {ch.name} {ch.progress ? <span className="sj-text-faint">({ch.progress})</span> : null}
               </div>
 
               {(ch.templateSlug === "dice_daily" || ch.templateSlug === "dice") && (() => {
@@ -272,12 +282,12 @@ export default function ChallengesPage() {
                 const canMultiplier10 = dl.allowedMultipliers.includes(10);
                 return (
                   <div className="space-y-2">
-                    <div className="text-xs opacity-70">Dice defaults</div>
+                    <div className="text-xs sj-text-muted">Dice defaults</div>
                     <div className="flex flex-wrap gap-2">
                       {allowedSides.map((side) => (
                         <button
                           key={side}
-                          className={`rounded border px-3 py-1 text-xs ${(dice.sides ?? 6) === side ? "bg-black text-white" : ""}`}
+                          className={`sj-toggle-btn ${(dice.sides ?? 6) === side ? "sj-toggle-btn-active" : ""}`}
                           onClick={() =>
                             patchSettings(ch.userChallengeId, {
                               dice: {
@@ -293,7 +303,7 @@ export default function ChallengesPage() {
                       ))}
                       {canTwoDice && (
                         <button
-                          className={`rounded border px-3 py-1 text-xs ${(dice.multiDice ?? 1) === 2 ? "bg-black text-white" : ""}`}
+                          className={`sj-toggle-btn ${(dice.multiDice ?? 1) === 2 ? "sj-toggle-btn-active" : ""}`}
                           onClick={() =>
                             patchSettings(ch.userChallengeId, {
                               dice: {
@@ -309,7 +319,7 @@ export default function ChallengesPage() {
                       )}
                       {canMultiplier10 && (
                         <button
-                          className={`rounded border px-3 py-1 text-xs ${(dice.multiplier ?? 1) === 10 ? "bg-black text-white" : ""}`}
+                          className={`sj-toggle-btn ${(dice.multiplier ?? 1) === 10 ? "sj-toggle-btn-active" : ""}`}
                           onClick={() =>
                             patchSettings(ch.userChallengeId, {
                               dice: {
@@ -338,11 +348,11 @@ export default function ChallengesPage() {
                 const drawOptions = Array.from({ length: maxDrawsMax }, (_, i) => (i + 1) as 1 | 2);
                 return (
                   <div className="space-y-2">
-                    <div className="text-xs opacity-70">Envelope defaults</div>
+                    <div className="text-xs sj-text-muted">Envelope defaults</div>
                     <div className="flex flex-wrap gap-2">
                       {allowedCadence.includes("daily") && (
                         <button
-                          className={`rounded border px-3 py-1 text-xs ${(envelopes.cadence ?? "daily") === "daily" ? "bg-black text-white" : ""}`}
+                          className={`sj-toggle-btn ${(envelopes.cadence ?? "daily") === "daily" ? "sj-toggle-btn-active" : ""}`}
                           onClick={() =>
                             patchSettings(ch.userChallengeId, {
                               envelopes: {
@@ -358,7 +368,7 @@ export default function ChallengesPage() {
                       )}
                       {allowedCadence.includes("weekly") && (
                         <button
-                          className={`rounded border px-3 py-1 text-xs ${(envelopes.cadence ?? "daily") === "weekly" ? "bg-black text-white" : ""}`}
+                          className={`sj-toggle-btn ${(envelopes.cadence ?? "daily") === "weekly" ? "sj-toggle-btn-active" : ""}`}
                           onClick={() =>
                             patchSettings(ch.userChallengeId, {
                               envelopes: {
@@ -374,7 +384,7 @@ export default function ChallengesPage() {
                       )}
                       {allowedOrder.includes("random") && (
                         <button
-                          className={`rounded border px-3 py-1 text-xs ${(envelopes.order ?? "random") === "random" ? "bg-black text-white" : ""}`}
+                          className={`sj-toggle-btn ${(envelopes.order ?? "random") === "random" ? "sj-toggle-btn-active" : ""}`}
                           onClick={() =>
                             patchSettings(ch.userChallengeId, {
                               envelopes: {
@@ -390,7 +400,7 @@ export default function ChallengesPage() {
                       )}
                       {allowedOrder.includes("reverse") && (
                         <button
-                          className={`rounded border px-3 py-1 text-xs ${(envelopes.order ?? "random") === "reverse" ? "bg-black text-white" : ""}`}
+                          className={`sj-toggle-btn ${(envelopes.order ?? "random") === "reverse" ? "sj-toggle-btn-active" : ""}`}
                           onClick={() =>
                             patchSettings(ch.userChallengeId, {
                               envelopes: {
@@ -407,7 +417,7 @@ export default function ChallengesPage() {
                       {drawOptions.map((n) => (
                         <button
                           key={n}
-                          className={`rounded border px-3 py-1 text-xs ${(envelopes.maxDrawsPerDay ?? 1) === n ? "bg-black text-white" : ""}`}
+                          className={`sj-toggle-btn ${(envelopes.maxDrawsPerDay ?? 1) === n ? "sj-toggle-btn-active" : ""}`}
                           onClick={() =>
                             patchSettings(ch.userChallengeId, {
                               envelopes: {

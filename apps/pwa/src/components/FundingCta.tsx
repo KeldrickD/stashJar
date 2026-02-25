@@ -5,6 +5,8 @@ import Link from "next/link";
 import { api, getRetryInfo } from "@/lib/api";
 import { DailyLimitCountdown } from "./DailyLimitCountdown";
 import { FundingModal } from "./FundingModal";
+import { StashCardHeader } from "./StashCardHeader";
+import { BaseChip } from "./Badges";
 
 const POLL_INTERVAL_MS = 5_000;
 const POLL_MAX_DURATION_MS = 60_000;
@@ -212,14 +214,18 @@ export function FundingCta({
 
   if (!walletReady) {
     return (
-      <section className="rounded-xl border p-5 space-y-3">
-        <h3 className="font-semibold">Set up your Stash</h3>
-        <p className="text-sm opacity-70">Takes a moment.</p>
+      <section className="space-y-3">
+        <StashCardHeader
+          icon="🏦"
+          title="Set up your Stash"
+          subtitle="Takes a moment."
+          right={<BaseChip />}
+        />
         <button
           type="button"
           disabled={busy}
           onClick={onSetUpWallet}
-          className="rounded bg-black text-white px-4 py-2 font-medium"
+          className="sj-btn sj-btn-primary sj-lift px-4 py-2 font-medium"
         >
           {busy ? "Setting up…" : "Set up wallet"}
         </button>
@@ -229,11 +235,14 @@ export function FundingCta({
 
   if (preferredFundingRail === "MANUAL_REFRESH_ONLY" || !enabled) {
     return (
-      <section className="rounded-xl border p-5 space-y-3">
-        <p className="text-sm opacity-70">
-          {preferredFundingRail === "MANUAL_REFRESH_ONLY" ? "Funding not available right now." : "Funding not available right now."}
-        </p>
-        <Link href="/history" className="rounded border border-black px-4 py-2 font-medium inline-block">
+      <section className="space-y-3">
+        <StashCardHeader
+          icon="🏦"
+          title="Manage Funds"
+          subtitle={preferredFundingRail === "MANUAL_REFRESH_ONLY" ? "Funding not available right now." : "Funding not available right now."}
+          right={<BaseChip />}
+        />
+        <Link href="/history" className="sj-btn sj-btn-secondary sj-lift px-4 py-2 font-medium inline-block">
           Withdraw
         </Link>
       </section>
@@ -241,7 +250,13 @@ export function FundingCta({
   }
 
   return (
-    <section className="rounded-xl border p-5 space-y-3">
+    <section className="space-y-3">
+      <StashCardHeader
+        icon="🏦"
+        title="Manage Funds"
+        subtitle="Move money in and out of your vault."
+        right={<BaseChip />}
+      />
       <FundingModal
         open={showFundingModal}
         sessionToken={fundingSessionToken}
@@ -253,27 +268,29 @@ export function FundingCta({
           type="button"
           disabled={busy || polling || sessionLoading}
           onClick={handleAddMoneyClick}
-          className="rounded bg-black text-white px-4 py-2 font-medium"
+          className="sj-btn sj-btn-primary sj-lift px-4 py-2 font-medium"
         >
           {sessionLoading ? "Opening…" : busy ? "Refreshing…" : polling ? "Checking…" : "Add money"}
         </button>
-        <Link href="/history" className="rounded border border-black px-4 py-2 font-medium inline-block">
+        <Link href="/history" className="sj-btn sj-btn-secondary sj-lift px-4 py-2 font-medium inline-block">
           Withdraw
         </Link>
       </div>
       {polling && (
-        <p className="text-sm text-amber-700">Waiting for funds… We’ll check again in a few seconds.</p>
+        <p className="text-sm text-amber-700">Waiting for funds... We will check again in a few seconds.</p>
       )}
       {!polling && lastChecked && (
-        <p className="text-xs opacity-70">Last checked {lastChecked}</p>
+        <p className="text-xs sj-text-faint">Last checked {lastChecked}</p>
       )}
       {dailyLimitNextAllowedAt && (
-        <DailyLimitCountdown nextAllowedAt={dailyLimitNextAllowedAt} label="Daily limit reached" />
+        <div className="sj-alert-amber">
+          <DailyLimitCountdown nextAllowedAt={dailyLimitNextAllowedAt} label="Daily limit reached" />
+        </div>
       )}
       {maxCreditsPerDayCents != null && maxCreditsPerDayCents > 0 && !dailyLimitNextAllowedAt && (
-        <p className="text-xs opacity-70">Daily add limit: ${(maxCreditsPerDayCents / 100).toFixed(0)}</p>
+        <p className="text-xs sj-text-faint">Daily add limit: ${(maxCreditsPerDayCents / 100).toFixed(0)}</p>
       )}
-      <p className="text-xs opacity-70">
+      <p className="text-xs sj-text-faint">
         {helperText
           ?? (uiMode === "open_in_wallet" && !deeplink
             ? "Open your wallet app to add funds, then return here and refresh."

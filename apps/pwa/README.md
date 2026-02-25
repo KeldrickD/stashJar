@@ -1,3 +1,11 @@
+## StashJar PWA
+
+Mint-glass savings experience for habit-driven daily saving.
+
+## UI Preview
+
+![StashJar home screen](./public/stashjar-home-preview.png)
+
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Getting Started

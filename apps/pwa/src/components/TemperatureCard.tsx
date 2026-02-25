@@ -2,6 +2,9 @@
 
 import { useState } from "react";
 import { api } from "@/lib/api";
+import { StashCard } from "@/components/StashCard";
+import { StashCardHeader } from "@/components/StashCardHeader";
+import { TodayBadge } from "@/components/Badges";
 
 type Card = {
   type: "temperature_daily";
@@ -92,28 +95,34 @@ export function TemperatureCard({ card, onDone }: Props) {
   }
 
   return (
-    <section className="rounded-xl border p-5 space-y-3">
-      <div className="text-lg font-semibold">{card.title}</div>
-      <div className="text-sm opacity-70">{card.prompt}</div>
+    <StashCard variant="soft" className="sj-appear">
+      <StashCardHeader
+        icon="🌡️"
+        title={card.title}
+        subtitle={card.prompt}
+        badge={<TodayBadge />}
+      />
 
-      <div className="flex flex-wrap gap-2">
+      <div className="mt-4 flex flex-wrap gap-2">
         {(card.availableScales ?? [1, 10]).map((s) => (
           <button
             key={s}
             disabled={busy}
             onClick={() => updateScale(s)}
-            className={`rounded border px-4 py-2 ${scale === s ? "bg-black text-white" : ""}`}
+            className={`sj-toggle-btn ${
+              scale === s ? "sj-toggle-btn-active" : ""
+            }`}
           >
             {s === 1 ? "Classic (Temp = Dollars)" : "Lite (Temp/10)"}
           </button>
         ))}
       </div>
 
-      <div className="flex flex-wrap gap-2">
+      <div className="mt-4 flex flex-wrap gap-2">
         <button
           disabled={busy}
           onClick={useGps}
-          className="rounded border px-4 py-2"
+          className="sj-btn sj-btn-primary px-4 py-2 text-sm"
         >
           Use today’s temperature
         </button>
@@ -128,14 +137,14 @@ export function TemperatureCard({ card, onDone }: Props) {
       </div>
 
       {tempInput && (
-        <div className="text-sm opacity-70">
+        <div className="text-sm sj-text-muted mt-2">
           {previewText(tempInput, scale, card.maxAmountCents)}
         </div>
       )}
 
-      {msg && <div className="text-sm">{msg}</div>}
-      {err && <div className="text-sm text-red-600">{err}</div>}
-    </section>
+      {msg && <div className="text-sm mt-2">{msg}</div>}
+      {err && <div className="text-sm text-red-600 mt-2">{err}</div>}
+    </StashCard>
   );
 
   async function updateScale(next: 1 | 10) {
@@ -180,7 +189,7 @@ function ManualTempInline({
         onChange={(e) => onChange(e.target.value)}
         placeholder={`Temp (${unit})`}
         inputMode="numeric"
-        className="border rounded px-3 py-2 w-28"
+        className="sj-input w-28"
       />
       <button
         disabled={disabled}
@@ -189,7 +198,7 @@ function ManualTempInline({
           if (!Number.isFinite(n)) return;
           onSubmit(n);
         }}
-        className="rounded border px-3 py-2"
+        className="sj-btn sj-btn-secondary px-3 py-2 text-sm"
       >
         Save
       </button>

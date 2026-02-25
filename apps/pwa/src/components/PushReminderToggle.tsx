@@ -94,7 +94,7 @@ export function PushReminderToggle() {
   if (status === null) return null;
 
   return (
-    <section className="rounded-xl border p-5 space-y-3">
+    <section className="sj-card-solid p-5 space-y-3">
       <h2 className="text-lg font-semibold">Reminders</h2>
       {error && (
         <p className="text-sm text-red-600" role="alert">
@@ -103,24 +103,24 @@ export function PushReminderToggle() {
       )}
       {status.subscriptionCount > 0 ? (
         <div className="flex items-center justify-between gap-2">
-          <p className="text-sm opacity-80">Reminders are on for this device.</p>
+          <p className="text-sm sj-text-muted">Reminders are on for this device.</p>
           <button
             type="button"
             onClick={disableReminders}
             disabled={loading}
-            className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium disabled:opacity-60"
+            className="sj-btn sj-btn-secondary px-3 py-1.5 text-sm font-medium disabled:opacity-60"
           >
             {loading ? "…" : "Disable reminders"}
           </button>
         </div>
       ) : (
         <div className="flex items-center justify-between gap-2">
-          <p className="text-sm opacity-80">Get a nudge when you haven’t saved yet.</p>
+          <p className="text-sm sj-text-muted">Get a nudge when you have not saved yet.</p>
           <button
             type="button"
             onClick={enableReminders}
             disabled={loading || !status.enabled}
-            className="rounded-lg bg-black text-white px-3 py-1.5 text-sm font-medium disabled:opacity-60"
+            className="sj-btn sj-btn-primary px-3 py-1.5 text-sm font-medium disabled:opacity-60"
           >
             {loading ? "…" : status.enabled ? "Enable reminders" : "Reminders unavailable"}
           </button>

@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { api, getRetryInfo, type FeatureActions, TodayCard, TodayBanner } from "@/lib/api";
@@ -10,6 +10,7 @@ import { DailyLimitCountdown } from "@/components/DailyLimitCountdown";
 import { FundingCta } from "@/components/FundingCta";
 import { PushReminderToggle } from "@/components/PushReminderToggle";
 import { TodayCardRenderer } from "@/components/TodayCardRenderer";
+import { BaseChip } from "@/components/Badges";
 import { sortTodayCards } from "@/lib/todayOrder";
 
 function fmt(cents: number) {
@@ -25,6 +26,21 @@ function getResetsInUtc(): string {
   const m = totalMins % 60;
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
+}
+
+function cardIcon(type: TodayCard["type"]): string {
+  switch (type) {
+    case "temperature_daily":
+      return "🌡️";
+    case "dice_daily":
+      return "🎲";
+    case "weather_wednesday":
+      return "🌦️";
+    case "envelopes_100":
+      return "✉️";
+    default:
+      return "✨";
+  }
 }
 
 const DEFAULT_ACTIONS: FeatureActions = {
@@ -94,6 +110,9 @@ function HomeContent() {
   const [withdrawDollars, setWithdrawDollars] = useState("5");
   const [withdrawDailyLimitNextAllowedAt, setWithdrawDailyLimitNextAllowedAt] = useState<string | null>(null);
   const [hasEverSavedChallenge, setHasEverSavedChallenge] = useState<boolean>(false);
+  const [weeklySavedCents, setWeeklySavedCents] = useState<number>(0);
+  const [showDepositModal, setShowDepositModal] = useState<boolean>(false);
+  const [showWithdrawModal, setShowWithdrawModal] = useState<boolean>(false);
 
   const advancedVisible = useMemo(
     () => flags.show_view_onchain || flags.show_powered_by_base_badge,
@@ -104,6 +123,26 @@ function HomeContent() {
   const doneForToday = Boolean(
     streak?.todayCompleted && sortedCards.length === 0 && !todayBanner && !todayError,
   );
+  const primaryCard = sortedCards[0];
+  const secondaryCards = sortedCards.slice(1);
+
+  const refreshWeeklySaved = useCallback(async (uid?: string) => {
+    const id = uid ?? userId;
+    if (!id) return;
+    try {
+      const tx = await api.getTxHistory(id);
+      const oneWeekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      const weekly = (tx.transactions ?? []).reduce((sum, item) => {
+        const t = new Date(item.occurredAt).getTime();
+        if (Number.isNaN(t) || t < oneWeekAgo) return sum;
+        if (item.amountCents <= 0) return sum;
+        return sum + item.amountCents;
+      }, 0);
+      setWeeklySavedCents(weekly);
+    } catch {
+      setWeeklySavedCents(0);
+    }
+  }, [userId]);
 
   async function ensureWalletThenRefresh() {
     if (!userId) return;
@@ -230,6 +269,7 @@ function HomeContent() {
           setStreak(home.streak);
           setPrevTodayCompleted(home.streak.todayCompleted);
           setTodayError(null);
+          void refreshWeeklySaved(uid);
           const stored = localStorage.getItem("focusEventId");
           if (stored) setFocusEventId(stored);
           if (typeof sessionStorage !== "undefined" && !sessionStorage.getItem("ev_visit_home")) {
@@ -256,7 +296,7 @@ function HomeContent() {
     return () => {
       alive = false;
     };
-  }, [router, pathname, homeContext]);
+  }, [router, pathname, homeContext, refreshWeeklySaved]);
 
   useEffect(() => {
     const focus = searchParams?.get("focus");
@@ -356,6 +396,7 @@ function HomeContent() {
       maybeShowStreakToast(home.streak, prevTodayCompleted);
       setPrevTodayCompleted(home.streak.todayCompleted);
       setTodayError(null);
+      void refreshWeeklySaved(uid);
     } catch {
       await refresh();
       await refreshTodayCards();
@@ -370,7 +411,8 @@ function HomeContent() {
 
     setStatus("Settling deposit…");
     await api.settleDeposit(pi.paymentIntent?.id ?? pi.id);
-    await refresh();
+    await refreshEverything();
+    setShowDepositModal(false);
     setStatus("");
   }
 
@@ -383,7 +425,8 @@ function HomeContent() {
       const pi = await api.requestWithdraw(userId, amountCents);
       setStatus("Marking paid…");
       await api.markWithdrawPaid(pi.id);
-      await refresh();
+      await refreshEverything();
+      setShowWithdrawModal(false);
       setStatus("");
     } catch (e) {
       const retry = getRetryInfo(e);
@@ -438,79 +481,62 @@ function HomeContent() {
   }, [actions.preferredFundingRail, fundingEnabled, walletReady, userId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <main className="mx-auto max-w-xl p-6 space-y-6">
+    <main className="mx-auto max-w-xl px-4 py-6 space-y-6">
       {toastMsg && (
         <div
-          className="fixed top-4 left-1/2 -translate-x-1/2 z-50 rounded-lg bg-black text-white px-4 py-2 text-sm font-medium shadow-lg animate-in fade-in duration-200"
+          className="sj-toast sj-pop"
           role="status"
         >
           {toastMsg}
         </div>
       )}
-      <header className="space-y-1">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h1 className="text-3xl font-bold">My Stash Jar</h1>
-          {streak && (
-            <div className="text-right text-sm space-y-0.5">
-              <span className="font-medium">🔥 {streak.currentStreakDays}-day streak</span>
-              {streak.bestStreakDays > 0 && (
-                <p className="text-xs opacity-70">Best: {streak.bestStreakDays}</p>
-              )}
-              {streak.streakStatus === "needs_recovery" && streak.recoveryTarget != null && (
-                <p className="text-xs font-medium text-amber-700 bg-amber-100 rounded px-1.5 py-0.5 inline-block">
-                  Recover streak ({streak.recoveryTarget} saves)
-                </p>
-              )}
-              {streak.streakShieldAvailable && streak.streakStatus === "ok" && (
-                <p className="text-xs opacity-70">🛡️ Shield ready</p>
-              )}
-              {!streak.todayCompleted && streak.streakStatus !== "needs_recovery" && (
-                <p className="text-xs opacity-70 mt-0.5">Save today to keep it alive</p>
-              )}
-            </div>
-          )}
+
+      <header className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs tracking-[0.16em] uppercase font-semibold text-emerald-700/80">StashJar</p>
+          <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight">Your Stash</h1>
         </div>
-        <p className="text-sm opacity-70 flex items-center gap-2">
-          Tier: {tier}
-          {actions.canDiceChooseSides && (
-            <span className="text-xs font-medium bg-violet-100 text-violet-800 rounded px-1.5 py-0.5">POWER</span>
-          )}
-        </p>
+        {streak && (
+          <div className="text-right">
+            <div className="sj-badge sj-badge-gold">🔥 {streak.currentStreakDays}-day streak</div>
+            {streak.bestStreakDays > 0 && (
+              <p className="text-xs sj-text-faint mt-1">Best: {streak.bestStreakDays}</p>
+            )}
+          </div>
+        )}
       </header>
 
-      {userId && actions.canPushReminders && (
-        <PushReminderToggle />
-      )}
-
-      <section className="rounded-xl border p-5 space-y-3">
-        <div className="text-sm opacity-70">Stash Balance</div>
-        <div className="text-4xl font-bold">{fmt(balanceCents)}</div>
-        {status && <div className="text-sm opacity-70">{status}</div>}
+      <section className="sj-card p-6 space-y-4 sj-appear">
+        <div className="flex items-center justify-between">
+          <p className="text-xs sj-text-faint tracking-wide">Vault Balance</p>
+          <BaseChip />
+        </div>
+        <p className="text-5xl font-semibold tracking-tight sj-count">{fmt(balanceCents)}</p>
+        <div className="grid grid-cols-3 gap-2 text-sm">
+          <div className="sj-card-solid p-3">
+            <p className="text-xs sj-text-faint">Total saved</p>
+            <p className="font-semibold mt-1">{fmt(balanceCents)}</p>
+          </div>
+          <div className="sj-card-solid p-3">
+            <p className="text-xs sj-text-faint">This week</p>
+            <p className="font-semibold mt-1">{fmt(weeklySavedCents)}</p>
+          </div>
+          <div className="sj-card-solid p-3">
+            <p className="text-xs sj-text-faint">Streak</p>
+            <p className="font-semibold mt-1">🔥 {streak?.currentStreakDays ?? 0}d</p>
+          </div>
+        </div>
+        {status && <div className="text-sm sj-text-muted">{status}</div>}
       </section>
 
-      {userId && (
-        <FundingCta
-          walletAddress={walletAddress}
-          enabled={fundingEnabled}
-          preferredFundingRail={actions.preferredFundingRail}
-          context={homeContext}
-          uiMode={fundingUiMode}
-          deeplink={fundingDeeplink}
-          deeplinkKind={fundingDeeplinkKind}
-          helperText={fundingHelperText}
-          lastRefreshAt={lastFundingRefreshAt}
-          busy={fundingBusy}
-          onSetUpWallet={ensureWalletThenRefresh}
-          onAddMoney={addMoneyRefresh}
-          onRefreshHome={refreshEverything}
-          walletReady={walletReady}
-          setToast={setToastMsg}
-          maxCreditsPerDayCents={maxCreditsPerDayCents}
-        />
+      {userId && actions.canPushReminders && (
+        <div className="sj-card p-4">
+          <PushReminderToggle />
+        </div>
       )}
 
       {todayError && (
-        <section className="rounded-xl border p-5 text-sm text-red-600">
+        <section className="sj-card p-5 text-sm text-red-600">
           {todayError}
         </section>
       )}
@@ -524,32 +550,42 @@ function HomeContent() {
       )}
 
       {doneForToday && (
-        <section className="rounded-xl border border-green-200 bg-green-50/50 p-5 space-y-4">
+        <section className="sj-card-soft p-5 space-y-4">
           <h2 className="text-xl font-semibold">You&apos;re done for today ✅</h2>
-          <p className="text-sm opacity-80">Your stash is on track. Come back tomorrow.</p>
+          <p className="text-sm sj-text-muted">Your stash is on track. Come back tomorrow.</p>
           {resetsIn && (
-            <p className="text-xs opacity-70">Resets in {resetsIn}</p>
-          )}
-          {streak && (streak.currentStreakDays > 0 || streak.bestStreakDays > 0) && (
-            <p className="text-sm">
-              🔥 {streak.currentStreakDays}-day streak
-              {streak.bestStreakDays > 0 && ` · Best: ${streak.bestStreakDays}`}
-            </p>
+            <p className="text-xs sj-text-faint">Resets in {resetsIn}</p>
           )}
           <div className="flex flex-wrap gap-3 pt-1">
-            <Link className="underline text-sm font-medium" href="/history">
+            <Link className="sj-link text-sm" href="/history">
               View activity
             </Link>
-            <Link className="underline text-sm font-medium" href="/challenges">
+            <Link className="sj-link text-sm" href="/challenges">
               Challenges
             </Link>
           </div>
         </section>
       )}
 
+      {userId && !doneForToday && primaryCard && (
+        <section className="space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-semibold sj-text-muted">Today&apos;s Save</p>
+            <span className="text-xs sj-text-faint">~5 sec</span>
+          </div>
+          <div className="sj-card-solid p-1 ring-2 ring-emerald-200/60 sj-lift sj-appear">
+            <div className="px-4 pt-4 flex items-center gap-2 text-sm">
+              <span className="text-xl">{cardIcon(primaryCard.type)}</span>
+              <span className="font-semibold sj-text-muted">Keep your streak alive. You are building momentum.</span>
+            </div>
+            <TodayCardRenderer userId={userId} card={primaryCard} actions={actions} onDone={refreshEverything} />
+          </div>
+        </section>
+      )}
+
       {userId &&
         !doneForToday &&
-        sortedCards.map((card, index) => {
+        secondaryCards.map((card, index) => {
           const eventId = "eventId" in card && typeof card.eventId === "string" ? card.eventId : undefined;
           const userChallengeId =
             "userChallengeId" in card && typeof card.userChallengeId === "string"
@@ -563,111 +599,174 @@ function HomeContent() {
           const id = eventId ? `card_${eventId}` : undefined;
           const highlightByEvent =
             focusEventId && eventId && focusEventId === eventId
-              ? "ring-2 ring-yellow-400"
+              ? "ring-2 ring-yellow-300 rounded-2xl"
               : "";
           const highlightByChallenge =
             focusUserChallengeId && userChallengeId && focusUserChallengeId === userChallengeId
-              ? "ring-2 ring-yellow-400"
+              ? "ring-2 ring-yellow-300 rounded-2xl"
               : "";
           const highlight = `${highlightByEvent} ${highlightByChallenge}`.trim();
           return (
             <div
               key={key}
               id={id}
-              className={highlight}
+              className={`sj-card-solid p-1 sj-lift ${highlight}`.trim()}
               data-user-challenge-id={userChallengeId ?? undefined}
             >
-              {actions.canDiceChooseSides && (
-                <span className="text-xs font-medium text-violet-600 mb-1 inline-block">POWER</span>
-              )}
+              <div className="px-4 pt-4 pb-1 flex items-center gap-2 text-sm sj-text-muted">
+                <span className="text-xl">{cardIcon(card.type)}</span>
+                <span className="font-medium">Daily action</span>
+              </div>
               <TodayCardRenderer userId={userId} card={card} actions={actions} onDone={refreshEverything} />
             </div>
           );
         })}
 
-      <section className="rounded-xl border p-5 space-y-4">
-        <h2 className="text-xl font-semibold">Add to Stash</h2>
-        <div className="flex gap-2 items-center">
-          <input
-            value={depositDollars}
-            onChange={(e) => setDepositDollars(e.target.value)}
-            className="border rounded px-3 py-2 w-28"
-            inputMode="decimal"
-          />
-          <button onClick={doDeposit} className="rounded bg-black text-white px-4 py-2">
-            Add
-          </button>
+      <section className="sj-card-solid p-5 space-y-4 sj-appear">
+        <div>
+          <h2 className="text-xl font-semibold">Manage Funds</h2>
+          <p className="text-sm sj-text-muted mt-1">Move money in and out of your vault.</p>
         </div>
-        <p className="text-xs opacity-70">(MVP: we simulate instant settlement)</p>
-      </section>
-
-      <section className="rounded-xl border p-5 space-y-4">
-        <h2 className="text-xl font-semibold">Withdraw</h2>
-        <div className="flex gap-2 items-center">
-          <input
-            value={withdrawDollars}
-            onChange={(e) => setWithdrawDollars(e.target.value)}
-            className="border rounded px-3 py-2 w-28"
-            inputMode="decimal"
-          />
-          <button onClick={doWithdraw} className="rounded bg-black text-white px-4 py-2">
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => setShowDepositModal(true)}
+            className="sj-btn sj-btn-primary py-3 text-sm sj-lift"
+          >
+            Add Money
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowWithdrawModal(true)}
+            className="sj-btn sj-btn-secondary py-3 text-sm sj-lift"
+          >
             Withdraw
           </button>
         </div>
-        {withdrawDailyLimitNextAllowedAt && (
-          <DailyLimitCountdown nextAllowedAt={withdrawDailyLimitNextAllowedAt} label="Withdraw daily limit reached" />
-        )}
       </section>
 
+      {userId && (
+        <div className="sj-card p-5">
+          <FundingCta
+            walletAddress={walletAddress}
+            enabled={fundingEnabled}
+            preferredFundingRail={actions.preferredFundingRail}
+            context={homeContext}
+            uiMode={fundingUiMode}
+            deeplink={fundingDeeplink}
+            deeplinkKind={fundingDeeplinkKind}
+            helperText={fundingHelperText}
+            lastRefreshAt={lastFundingRefreshAt}
+            busy={fundingBusy}
+            onSetUpWallet={ensureWalletThenRefresh}
+            onAddMoney={addMoneyRefresh}
+            onRefreshHome={refreshEverything}
+            walletReady={walletReady}
+            setToast={setToastMsg}
+            maxCreditsPerDayCents={maxCreditsPerDayCents}
+          />
+        </div>
+      )}
+
       {activeChallenges.length > 0 && (
-        <section className="rounded-xl border p-4 text-sm opacity-90 space-y-3">
+        <section className="sj-card p-5 text-sm space-y-3">
           <div className="font-medium">Active challenges</div>
           <div className="flex flex-wrap gap-2">
             {activeChallenges.map((c) => (
               <span
                 key={c.userChallengeId}
                 id={`active_uc_${c.userChallengeId}`}
-                className="rounded border px-2 py-1 text-xs"
+                className="sj-badge sj-badge-brand"
               >
                 {c.progress ? `${c.name} (${c.progress})` : c.name}
               </span>
             ))}
           </div>
-          <Link href="/challenges" className="inline-block underline">
+          <Link href="/challenges" className="sj-link inline-block">
             Manage challenges →
           </Link>
         </section>
       )}
 
-      <section className="rounded-xl border p-5 space-y-3">
-        <h2 className="text-xl font-semibold">Challenges</h2>
+      <section className="sj-card p-5 space-y-3">
+        <h2 className="text-xl font-semibold">Explore</h2>
         <div className="grid grid-cols-1 gap-2">
-          <Link className="underline" href="/challenges">
-            Go to Challenges
+          <Link className="sj-link" href="/challenges">
+            Go to challenges
           </Link>
-          <Link className="underline" href="/history">
-            View History
+          <Link className="sj-link" href="/history">
+            View history
           </Link>
         </div>
       </section>
 
       {advancedVisible && (
-        <section className="rounded-xl border p-5 space-y-2">
-          <h2 className="text-xl font-semibold">Advanced</h2>
+        <section className="sj-card p-5 space-y-2">
+          <h2 className="text-base font-semibold">Advanced</h2>
+          <div className="text-xs sj-text-faint">Profile tier: {tier}</div>
           {flags.show_powered_by_base_badge && (
-            <div className="text-sm">Powered by Base (hidden for normies)</div>
+            <div className="text-sm sj-text-muted">Powered by Base</div>
           )}
           {flags.show_view_onchain && (
-            <div className="text-sm opacity-70">Onchain view will live here in Step 20.</div>
+            <div className="text-sm sj-text-faint">Onchain view will appear here soon.</div>
           )}
         </section>
       )}
 
-      <footer className="text-xs opacity-60">
+      {showDepositModal && (
+        <div className="sj-modal-backdrop">
+          <div className="w-full max-w-md sj-card p-5 space-y-4">
+            <h3 className="text-lg font-semibold">Add money</h3>
+            <input
+              value={depositDollars}
+              onChange={(e) => setDepositDollars(e.target.value)}
+              className="sj-input"
+              inputMode="decimal"
+              placeholder="Amount in USD"
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <button type="button" onClick={() => setShowDepositModal(false)} className="sj-btn sj-btn-secondary py-2.5">
+                Cancel
+              </button>
+              <button type="button" onClick={doDeposit} className="sj-btn sj-btn-primary py-2.5">
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showWithdrawModal && (
+        <div className="sj-modal-backdrop">
+          <div className="w-full max-w-md sj-card p-5 space-y-4">
+            <h3 className="text-lg font-semibold">Withdraw</h3>
+            <input
+              value={withdrawDollars}
+              onChange={(e) => setWithdrawDollars(e.target.value)}
+              className="sj-input"
+              inputMode="decimal"
+              placeholder="Amount in USD"
+            />
+            {withdrawDailyLimitNextAllowedAt && (
+              <DailyLimitCountdown nextAllowedAt={withdrawDailyLimitNextAllowedAt} label="Withdraw daily limit reached" />
+            )}
+            <div className="grid grid-cols-2 gap-2">
+              <button type="button" onClick={() => setShowWithdrawModal(false)} className="sj-btn sj-btn-secondary py-2.5">
+                Cancel
+              </button>
+              <button type="button" onClick={doWithdraw} className="sj-btn sj-btn-primary py-2.5">
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <footer className="text-xs sj-text-faint pb-8">
         {userId && (
           <>
             User: {userId} •{" "}
-            <button onClick={handleLogout} className="underline">
+            <button onClick={handleLogout} className="sj-link">
               Sign out
             </button>
           </>

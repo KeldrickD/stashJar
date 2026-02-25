@@ -39,25 +39,26 @@ export default function HistoryPage() {
   }, [router, pathname]);
 
   return (
-    <main className="mx-auto max-w-xl p-6 space-y-6">
-      <header>
-        <h1 className="text-2xl font-bold">History</h1>
-        <Link className="underline text-sm opacity-70" href="/">
+    <main className="mx-auto max-w-xl px-4 py-6 space-y-6">
+      <header className="space-y-2">
+        <h1 className="text-3xl font-semibold tracking-tight">History</h1>
+        <p className="text-sm sj-text-muted">Track every movement in your vault.</p>
+        <Link className="sj-link text-sm" href="/">
           ← Back
         </Link>
       </header>
 
-      {status && <div className="text-sm opacity-70">{status}</div>}
+      {status && <div className="text-sm sj-text-muted">{status}</div>}
 
       <ul className="space-y-2">
         {items.map((t, i) => (
-          <li key={i} className="rounded-xl border p-4">
+          <li key={i} className="sj-card-solid p-4 sj-lift">
             <div className="flex justify-between">
-              <div className="font-semibold">{t.type}</div>
+              <div className="font-semibold">{t.type.replaceAll("_", " ")}</div>
               <div className="font-mono">{fmt(t.amountCents)}</div>
             </div>
-            <div className="text-xs opacity-60">{new Date(t.occurredAt).toLocaleString()}</div>
-            {t.memo && <div className="text-sm opacity-70">{t.memo}</div>}
+            <div className="text-xs sj-text-faint">{new Date(t.occurredAt).toLocaleString()}</div>
+            {t.memo && <div className="text-sm sj-text-muted">{t.memo}</div>}
           </li>
         ))}
       </ul>

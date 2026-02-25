@@ -26,16 +26,18 @@ function AuthSuccessContent() {
   }, [router, returnTo]);
 
   return (
-    <main className="mx-auto max-w-md p-6 text-center space-y-4">
-      <p className="text-lg font-medium">You&apos;re signed in ✅</p>
-      <p className="text-sm opacity-80">Redirecting…</p>
+    <main className="min-h-screen px-4 py-10">
+      <div className="mx-auto max-w-md sj-card-soft p-8 text-center space-y-4 sj-appear">
+        <p className="text-lg font-semibold">You&apos;re signed in ✅</p>
+        <p className="text-sm sj-text-muted">Redirecting...</p>
+      </div>
     </main>
   );
 }
 
 export default function AuthSuccessPage() {
   return (
-    <Suspense fallback={<main className="mx-auto max-w-md p-6 text-center">Redirecting…</main>}>
+    <Suspense fallback={<main className="mx-auto max-w-md p-6 text-center">Redirecting...</main>}>
       <AuthSuccessContent />
     </Suspense>
   );

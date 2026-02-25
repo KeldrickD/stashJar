@@ -36,50 +36,55 @@ function LoginContent() {
   }
 
   return (
-    <main className="mx-auto max-w-md p-6 space-y-6">
-      <header>
-        <h1 className="text-2xl font-bold">Sign in</h1>
-        <p className="text-sm opacity-80 mt-1">
-          We&apos;ll email you a sign-in link. No password.
-        </p>
-      </header>
+    <main className="min-h-screen px-4 py-10">
+      <div className="mx-auto max-w-md sj-card-soft p-7 sm:p-8 space-y-6">
+        <header className="space-y-2">
+          <p className="text-xs tracking-[0.18em] uppercase text-emerald-700/80 font-semibold">
+            StashJar
+          </p>
+          <h1 className="text-3xl font-semibold tracking-tight">Build your savings habit.</h1>
+          <p className="text-sm sj-text-muted">
+            Small daily actions. Real money saved. No friction.
+          </p>
+        </header>
 
-      {!sent ? (
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label htmlFor="email" className="block text-sm font-medium mb-1">
-              Email
-            </label>
-            <input
-              id="email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
-              className="w-full border rounded-lg px-3 py-2"
-              autoComplete="email"
-              required
+        {!sent ? (
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label htmlFor="email" className="block text-sm font-medium mb-1.5">
+                Email
+              </label>
+              <input
+                id="email"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+                className="sj-input px-4 py-3 text-sm focus:border-emerald-300 focus:outline-none"
+                autoComplete="email"
+                required
+                disabled={loading}
+              />
+            </div>
+            {error && (
+              <p className="text-sm text-red-600" role="alert">
+                {error}
+              </p>
+            )}
+            <button
+              type="submit"
               disabled={loading}
-            />
-          </div>
-          {error && (
-            <p className="text-sm text-red-600" role="alert">
-              {error}
-            </p>
-          )}
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full rounded-lg bg-black text-white py-2 font-medium disabled:opacity-60"
-          >
-            {loading ? "Sending…" : "Send link"}
-          </button>
-        </form>
-      ) : (
-        <p className="text-sm opacity-90">
-          Check your email for the sign-in link.
-        </p>
-      )}
+              className="w-full sj-btn sj-btn-primary py-3 text-sm disabled:opacity-60"
+            >
+              {loading ? "Sending…" : "Send sign-in link"}
+            </button>
+          </form>
+        ) : (
+          <p className="text-sm sj-text-muted">
+            Check your email for the sign-in link.
+          </p>
+        )}
+      </div>
     </main>
   );
 }

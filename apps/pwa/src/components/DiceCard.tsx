@@ -3,6 +3,9 @@
 import { useState } from "react";
 import { api } from "@/lib/api";
 import type { DiceTodayCard, FeatureActions } from "@/lib/api";
+import { StashCard } from "@/components/StashCard";
+import { StashCardHeader } from "@/components/StashCardHeader";
+import { PowerBadge, TodayBadge } from "@/components/Badges";
 
 type Props = {
   userId: string;
@@ -74,26 +77,32 @@ export function DiceCard({ userId, card, actions, onDone }: Props) {
   }
 
   return (
-    <section className="rounded-xl border p-5 space-y-3">
-      <div className="text-lg font-semibold">{card.title}</div>
-      <div className="text-sm opacity-70">
-        {card.prompt}
-        {(multiDice || multiplier10 || (sides !== 6 && sides > 0)) && (
-          <span className="ml-1 text-xs opacity-60">
-            {multiplier10 ? " ×10" : multiDice ? " 2×D" + sides : " D" + sides}
-          </span>
-        )}
-      </div>
+    <StashCard variant="soft" className="sj-appear">
+      <StashCardHeader
+        icon="🎲"
+        title={card.title}
+        subtitle={card.prompt}
+        badge={<TodayBadge />}
+        right={actions.canDiceChooseSides ? <PowerBadge /> : null}
+      />
+
+      {(multiDice || multiplier10 || sides !== 6) && (
+        <div className="text-xs sj-text-faint mt-2">
+          Active mode: {multiplier10 ? "×10" : multiDice ? `2×D${sides}` : `D${sides}`}
+        </div>
+      )}
 
       {actions.canDiceChooseSides && (
-        <div className="flex flex-wrap gap-2">
+        <div className="mt-4 flex flex-wrap gap-2">
           {allowedSides.map((opt) => (
             <button
               key={opt}
               type="button"
               disabled={busy}
               onClick={() => setSides(opt)}
-              className={`rounded border px-3 py-1.5 text-sm ${sides === opt ? "bg-black text-white" : ""}`}
+              className={`sj-toggle-btn ${
+                sides === opt ? "sj-toggle-btn-active" : ""
+              }`}
             >
               D{opt}
             </button>
@@ -107,7 +116,9 @@ export function DiceCard({ userId, card, actions, onDone }: Props) {
             type="button"
             disabled={busy || multiplier10}
             onClick={() => setMultiDice((v) => !v)}
-            className={`rounded border px-3 py-1.5 text-sm ${multiDice ? "bg-black text-white" : ""}`}
+            className={`sj-toggle-btn ${
+              multiDice ? "sj-toggle-btn-active" : ""
+            }`}
           >
             2 dice
           </button>
@@ -117,36 +128,38 @@ export function DiceCard({ userId, card, actions, onDone }: Props) {
             type="button"
             disabled={busy || multiDice}
             onClick={() => setMultiplier10((v) => !v)}
-            className={`rounded border px-3 py-1.5 text-sm ${multiplier10 ? "bg-black text-white" : ""}`}
+            className={`sj-toggle-btn ${
+              multiplier10 ? "sj-toggle-btn-active" : ""
+            }`}
           >
             ×10
           </button>
         )}
       </div>
 
-      <div className="flex flex-wrap gap-2">
+      <div className="mt-4 flex flex-wrap gap-2">
         <button
           disabled={busy}
           onClick={roll}
-          className="rounded border px-4 py-2"
+          className="sj-btn sj-btn-primary px-4 py-2 text-sm"
         >
-          Roll
+          Roll today
         </button>
         {canSaveDefaults && (
           <button
             type="button"
             disabled={busy}
             onClick={saveDefaults}
-            className="rounded border px-4 py-2"
+            className="sj-btn sj-btn-secondary px-4 py-2 text-sm"
           >
             Save as default
           </button>
         )}
       </div>
 
-      {msg && <div className="text-sm">{msg}</div>}
-      {err && <div className="text-sm text-red-600">{err}</div>}
-    </section>
+      {msg && <div className="text-sm mt-2">{msg}</div>}
+      {err && <div className="text-sm text-red-600 mt-2">{err}</div>}
+    </StashCard>
   );
 }
 

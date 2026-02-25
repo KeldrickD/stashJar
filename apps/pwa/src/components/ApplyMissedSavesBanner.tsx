@@ -16,19 +16,19 @@ export function ApplyMissedSavesBanner({ userId, banner, onDone }: Props) {
 
   if (banner.type === "needs_input") {
     return (
-      <section className="rounded-xl border p-5 space-y-2">
+      <section className="sj-card-solid p-5 space-y-2">
         <div className="text-lg font-semibold">{banner.label}</div>
-        <div className="text-sm opacity-70">{banner.subLabel}</div>
-        <div className="text-sm opacity-70">Pending: {banner.pendingCount}</div>
+        <div className="text-sm sj-text-muted">{banner.subLabel}</div>
+        <div className="text-sm sj-text-muted">Pending: {banner.pendingCount}</div>
       </section>
     );
   }
 
   if (banner.type === "waiting_for_funds") {
     return (
-      <section className="rounded-xl border p-5 space-y-2">
+      <section className="sj-card-solid p-5 space-y-2">
         <div className="text-lg font-semibold">Waiting for funds</div>
-        <div className="text-sm opacity-70">{banner.message}</div>
+        <div className="text-sm sj-text-muted">{banner.message}</div>
       </section>
     );
   }
@@ -61,15 +61,15 @@ export function ApplyMissedSavesBanner({ userId, banner, onDone }: Props) {
   }
 
   return (
-    <section className="rounded-xl border p-5 space-y-2">
+    <section className="sj-card-solid p-5 space-y-2">
       <div className="text-lg font-semibold">{banner.label}</div>
-      <div className="text-sm opacity-70">{banner.subLabel}</div>
-      <div className="text-sm opacity-70">Pending: {banner.pendingCount}</div>
+      <div className="text-sm sj-text-muted">{banner.subLabel}</div>
+      <div className="text-sm sj-text-muted">Pending: {banner.pendingCount}</div>
       <div>
         <button
           disabled={busy}
           onClick={applyNow}
-          className="rounded border px-4 py-2"
+          className="sj-btn sj-btn-primary px-4 py-2"
         >
           Apply now
         </button>
