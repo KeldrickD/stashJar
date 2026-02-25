@@ -7,7 +7,9 @@ function urlBase64ToUint8Array(base64: string): Uint8Array {
   const padding = "=".repeat((4 - (base64.length % 4)) % 4);
   const b64 = (base64 + padding).replace(/-/g, "+").replace(/_/g, "/");
   const raw = atob(b64);
-  const out = new Uint8Array(raw.length);
+  // Use a concrete ArrayBuffer so the value satisfies PushSubscriptionOptionsInit.
+  const buffer = new ArrayBuffer(raw.length);
+  const out = new Uint8Array(buffer);
   for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
   return out;
 }
@@ -57,7 +59,7 @@ export function PushReminderToggle() {
       }
       const sub = await reg!.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
+        applicationServerKey: urlBase64ToUint8Array(vapidPublicKey) as BufferSource,
       });
       const endpoint = sub.endpoint;
       const p256dh = arrayBufferToBase64(sub.getKey("p256dh")!);
