@@ -17,12 +17,13 @@ import {
   getWithdrawDailyLimitCents,
 } from "./lib/fundingLimits";
 import { deterministicWalletProvider } from "./lib/walletProvider";
-import { isAddress } from "viem";
+import { getAddress, isAddress, verifyMessage } from "viem";
 import {
   sendMagicLinkEmail as sendMagicLinkEmailResend,
   sendWeeklyRecapEmail,
   type WeeklyRecapPayload,
 } from "./email/resend";
+import { registerWalletAuthRoutes } from "./routes/walletAuth";
 import webpush from "web-push";
 
 const EnvSchema = z.object({
@@ -96,7 +97,7 @@ app.addHook("onRequest", async (request: any) => {
   request._startTime = Date.now();
 });
 
-app.addHook("onResponse", async (request: any, reply, payload) => {
+app.addHook("onResponse", async (request: any, reply) => {
   const start = request._startTime;
   if (typeof start === "number") {
     const durationMs = Date.now() - start;
@@ -1172,6 +1173,17 @@ function sanitizeReturnTo(value: string | undefined): string | null {
 const AuthStartSchema = z.object({
   email: z.string().email().transform((e) => e.trim().toLowerCase()),
   returnTo: z.string().optional(),
+});
+
+registerWalletAuthRoutes(app, {
+  prisma,
+  AUTH_PEPPER,
+  SESSION_TTL_DAYS,
+  hashWithPepper,
+  generateRawSession,
+  setSessionCookie,
+  getClientIP,
+  sanitizeReturnTo,
 });
 
 app.post("/auth/start", async (req, reply) => {
@@ -5215,10 +5227,10 @@ app.post("/challenges/:id/draw", { preHandler: [requireAuth] }, async (req, repl
 
   // Draw random
   const index = Math.floor(Math.random() * state.remaining.length);
-  const envelope = state.remaining[index];
-  const amountCents = envelope * (rules.unitAmountCents ?? 100);
+  const envelopeNumber = state.remaining[index];
+  const amountCents = envelopeNumber * (rules.unitAmountCents ?? 100);
 
-  const eventIdempo = `env_${uc.id}_${envelope}`;
+  const eventIdempo = `env_${uc.id}_${envelopeNumber}`;
 
   // Idempotency check
   const existing = await prisma.challengeEvent.findUnique({
@@ -5236,7 +5248,7 @@ app.post("/challenges/:id/draw", { preHandler: [requireAuth] }, async (req, repl
       committedPi = res.paymentIntentId;
     }
     return {
-      envelope: envMeta.envelope ?? envelope,
+      envelope: envMeta.envelope ?? envelopeNumber,
       amountCents: existing.amountCents,
       remainingCount: state.remaining.length,
       paymentIntentId: committedPi,
@@ -5248,11 +5260,11 @@ app.post("/challenges/:id/draw", { preHandler: [requireAuth] }, async (req, repl
       userId: uc.userId,
       amountCents,
       idempotencyKey: `dep_${eventIdempo}`,
-      metadata: { challengeId: uc.id, envelope },
+      metadata: { challengeId: uc.id, envelope: envelopeNumber },
     });
 
     state.remaining.splice(index, 1);
-    state.used.push(envelope);
+    state.used.push(envelopeNumber);
 
     const ce = await prisma.$transaction(async (tx) => {
       const created = await tx.challengeEvent.create({
@@ -5263,7 +5275,7 @@ app.post("/challenges/:id/draw", { preHandler: [requireAuth] }, async (req, repl
           amountCents,
           result: "DEPOSIT_CREATED",
           paymentIntentId: pi.id,
-          metadata: { envelope } as any,
+          metadata: { envelope: envelopeNumber } as any,
         } as any,
       });
       await tx.userChallenge.update({
@@ -5292,7 +5304,7 @@ app.post("/challenges/:id/draw", { preHandler: [requireAuth] }, async (req, repl
     }
 
     return {
-      envelope,
+      envelope: envelopeNumber,
       amountCents,
       remainingCount: state.remaining.length,
       paymentIntentId: committedPi,

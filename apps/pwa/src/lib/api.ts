@@ -366,9 +366,37 @@ export type AuthMe = {
   flags: Record<string, boolean>;
 };
 
+export type WalletAuthNonceResponse = {
+  address: string;
+  nonce: string;
+  issuedAt: string;
+  expiresAt: string;
+  message: string;
+};
+
+export type WalletAuthVerifyResponse = {
+  ok: true;
+  userId: string;
+  returnTo: string;
+};
+
 export const api = {
   startAuth: (email: string, returnTo?: string | null) =>
     req<{ ok: boolean }>("POST", "/auth/start", { email, returnTo: returnTo ?? undefined }),
+
+  walletAuthNonce: (address: string, returnTo?: string | null) =>
+    req<WalletAuthNonceResponse>("POST", "/auth/wallet/nonce", {
+      address,
+      returnTo: returnTo ?? undefined,
+    }),
+
+  walletAuthVerify: (address: string, message: string, signature: string, returnTo?: string | null) =>
+    req<WalletAuthVerifyResponse>("POST", "/auth/wallet/verify", {
+      address,
+      message,
+      signature,
+      returnTo: returnTo ?? undefined,
+    }),
 
   getMe: async (): Promise<AuthMe> => {
     const res = await fetch(`${API}/auth/me`, fetchOpts("GET"));

@@ -17,6 +17,9 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "StashJar",
   description: "Build your savings habit with daily momentum.",
+  other: {
+    "base:app_id": "699e7436c1f6230c77564bd4",
+  },
 };
 
 export default function RootLayout({
