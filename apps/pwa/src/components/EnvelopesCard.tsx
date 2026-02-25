@@ -6,6 +6,8 @@ import type { EnvelopesTodayCard, FeatureActions } from "@/lib/api";
 import { StashCard } from "@/components/StashCard";
 import { StashCardHeader } from "@/components/StashCardHeader";
 import { PowerBadge, TodayBadge } from "@/components/Badges";
+import { StashActionGroup } from "@/components/StashActionGroup";
+import { StashStatusLine } from "@/components/StashStatusLine";
 
 type Props = {
   userId: string;
@@ -196,23 +198,23 @@ export function EnvelopesCard({ userId, card, actions, onDone }: Props) {
       </div>
 
       {card.drewToday ? (
-        <div className="text-sm text-emerald-700">
-          Already drew today ✅ Come back tomorrow.
-        </div>
+        <StashStatusLine tone="success" text="Already drew today ✅ Come back tomorrow." />
       ) : (
-        <div className="flex flex-wrap gap-2">
-          <button
-            disabled={busy || card.remainingCount === 0}
-            onClick={draw}
-            className="sj-btn sj-btn-primary px-4 py-2 font-medium disabled:opacity-50"
-          >
-            Draw now
-          </button>
-        </div>
+        <StashActionGroup
+          variant="stack"
+          loading={busy}
+          primary={{
+            label: "Draw now",
+            onClick: () => {
+              void draw();
+            },
+            disabled: busy || card.remainingCount === 0,
+          }}
+        />
       )}
 
-      {msg && <div className="text-sm mt-2">{msg}</div>}
-      {err && <div className="text-sm text-red-600 mt-2">{err}</div>}
+      {msg && <StashStatusLine tone="success" text={msg} compact />}
+      {err && <StashStatusLine tone="warning" text={err} compact />}
     </StashCard>
   );
 }

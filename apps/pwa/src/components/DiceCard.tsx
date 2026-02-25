@@ -6,6 +6,8 @@ import type { DiceTodayCard, FeatureActions } from "@/lib/api";
 import { StashCard } from "@/components/StashCard";
 import { StashCardHeader } from "@/components/StashCardHeader";
 import { PowerBadge, TodayBadge } from "@/components/Badges";
+import { StashActionGroup } from "@/components/StashActionGroup";
+import { StashStatusLine } from "@/components/StashStatusLine";
 
 type Props = {
   userId: string;
@@ -137,28 +139,27 @@ export function DiceCard({ userId, card, actions, onDone }: Props) {
         )}
       </div>
 
-      <div className="mt-4 flex flex-wrap gap-2">
-        <button
-          disabled={busy}
-          onClick={roll}
-          className="sj-btn sj-btn-primary px-4 py-2 text-sm"
-        >
-          Roll today
-        </button>
-        {canSaveDefaults && (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={saveDefaults}
-            className="sj-btn sj-btn-secondary px-4 py-2 text-sm"
-          >
-            Save as default
-          </button>
-        )}
-      </div>
+      <StashActionGroup
+        variant="stack"
+        loading={busy}
+        primary={{
+          label: "Roll today",
+          onClick: () => {
+            void roll();
+          },
+          disabled: busy,
+        }}
+        secondary={canSaveDefaults ? {
+          label: "Save as default",
+          onClick: () => {
+            void saveDefaults();
+          },
+          disabled: busy,
+        } : undefined}
+      />
 
-      {msg && <div className="text-sm mt-2">{msg}</div>}
-      {err && <div className="text-sm text-red-600 mt-2">{err}</div>}
+      {msg && <StashStatusLine tone="success" text={msg} compact />}
+      {err && <StashStatusLine tone="warning" text={err} compact />}
     </StashCard>
   );
 }

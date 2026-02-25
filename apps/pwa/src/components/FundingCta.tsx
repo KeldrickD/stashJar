@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
 import { api, getRetryInfo } from "@/lib/api";
 import { DailyLimitCountdown } from "./DailyLimitCountdown";
 import { FundingModal } from "./FundingModal";
 import { StashCardHeader } from "./StashCardHeader";
 import { BaseChip } from "./Badges";
+import { StashActionGroup } from "./StashActionGroup";
+import { StashStatusLine } from "./StashStatusLine";
 
 const POLL_INTERVAL_MS = 5_000;
 const POLL_MAX_DURATION_MS = 60_000;
@@ -211,6 +212,11 @@ export function FundingCta({
   };
 
   const lastChecked = formatLastChecked(lastRefreshAt);
+  const fundingHelperCopy =
+    helperText
+    ?? (uiMode === "open_in_wallet" && !deeplink
+      ? "Open your wallet app to add funds, then return here and refresh."
+      : "Add money via Coinbase. Tap Refresh if your balance does not update in around 30 seconds.");
 
   if (!walletReady) {
     return (
@@ -221,14 +227,15 @@ export function FundingCta({
           subtitle="Takes a moment."
           right={<BaseChip />}
         />
-        <button
-          type="button"
-          disabled={busy}
-          onClick={onSetUpWallet}
-          className="sj-btn sj-btn-primary sj-lift px-4 py-2 font-medium"
-        >
-          {busy ? "Setting up…" : "Set up wallet"}
-        </button>
+        <StashActionGroup
+          variant="stack"
+          loading={busy}
+          primary={{
+            label: "Set up wallet",
+            onClick: onSetUpWallet,
+            disabled: busy,
+          }}
+        />
       </section>
     );
   }
@@ -242,9 +249,15 @@ export function FundingCta({
           subtitle={preferredFundingRail === "MANUAL_REFRESH_ONLY" ? "Funding not available right now." : "Funding not available right now."}
           right={<BaseChip />}
         />
-        <Link href="/history" className="sj-btn sj-btn-secondary sj-lift px-4 py-2 font-medium inline-block">
-          Withdraw
-        </Link>
+        <StashActionGroup
+          variant="stack"
+          primary={{
+            label: "Withdraw",
+            onClick: () => {
+              window.location.href = "/history";
+            },
+          }}
+        />
       </section>
     );
   }
@@ -263,41 +276,50 @@ export function FundingCta({
         onClose={handleCloseFundingModal}
         onAfterFunding={handleAddMoney}
       />
-      <div className="flex flex-wrap gap-2 items-center">
-        <button
-          type="button"
-          disabled={busy || polling || sessionLoading}
-          onClick={handleAddMoneyClick}
-          className="sj-btn sj-btn-primary sj-lift px-4 py-2 font-medium"
-        >
-          {sessionLoading ? "Opening…" : busy ? "Refreshing…" : polling ? "Checking…" : "Add money"}
-        </button>
-        <Link href="/history" className="sj-btn sj-btn-secondary sj-lift px-4 py-2 font-medium inline-block">
-          Withdraw
-        </Link>
-      </div>
+      <StashActionGroup
+        variant="split"
+        loading={busy || polling || sessionLoading}
+        primary={{
+          label: "Add money",
+          onClick: () => {
+            void handleAddMoneyClick();
+          },
+          disabled: busy || polling || sessionLoading,
+        }}
+        secondary={{
+          label: "Withdraw",
+          onClick: () => {
+            window.location.href = "/history";
+          },
+          disabled: busy || polling || sessionLoading,
+        }}
+        helperText={fundingHelperCopy}
+        tone="default"
+      />
       {polling && (
-        <p className="text-sm text-amber-700">Waiting for funds... We will check again in a few seconds.</p>
+        <StashStatusLine
+          tone="muted"
+          compact
+          text="Waiting for funds... We will check again in a few seconds."
+        />
       )}
       {!polling && lastChecked && (
-        <p className="text-xs sj-text-faint">Last checked {lastChecked}</p>
+        <StashStatusLine
+          tone="muted"
+          compact
+          text={`Last checked ${lastChecked}`}
+        />
       )}
       {dailyLimitNextAllowedAt && (
-        <div className="sj-alert-amber">
-          <DailyLimitCountdown nextAllowedAt={dailyLimitNextAllowedAt} label="Daily limit reached" />
-        </div>
+        <StashStatusLine
+          tone="warning"
+          text="Daily limit reached"
+          right={<DailyLimitCountdown nextAllowedAt={dailyLimitNextAllowedAt} label="" />}
+        />
       )}
       {maxCreditsPerDayCents != null && maxCreditsPerDayCents > 0 && !dailyLimitNextAllowedAt && (
         <p className="text-xs sj-text-faint">Daily add limit: ${(maxCreditsPerDayCents / 100).toFixed(0)}</p>
       )}
-      <p className="text-xs sj-text-faint">
-        {helperText
-          ?? (uiMode === "open_in_wallet" && !deeplink
-            ? "Open your wallet app to add funds, then return here and refresh."
-            : "Add money via Coinbase → tap ")}
-        {!helperText && !(uiMode === "open_in_wallet" && !deeplink) && <strong>Refresh</strong>}
-        {!helperText && !(uiMode === "open_in_wallet" && !deeplink) && " if your balance doesn’t update in ~30s."}
-      </p>
     </section>
   );
 }

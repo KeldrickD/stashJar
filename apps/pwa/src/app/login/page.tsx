@@ -1,8 +1,9 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
+import { StashActionGroup } from "@/components/StashActionGroup";
 
 function sanitizeReturnTo(value: string | null): string | null {
   if (!value || typeof value !== "string") return null;
@@ -18,6 +19,7 @@ function LoginContent() {
   const [sent, setSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const formRef = useRef<HTMLFormElement | null>(null);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -49,7 +51,7 @@ function LoginContent() {
         </header>
 
         {!sent ? (
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form ref={formRef} onSubmit={handleSubmit} className="space-y-4">
             <div>
               <label htmlFor="email" className="block text-sm font-medium mb-1.5">
                 Email
@@ -71,13 +73,18 @@ function LoginContent() {
                 {error}
               </p>
             )}
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full sj-btn sj-btn-primary py-3 text-sm disabled:opacity-60"
-            >
-              {loading ? "Sending…" : "Send sign-in link"}
-            </button>
+            <StashActionGroup
+              variant="stack"
+              loading={loading}
+              primary={{
+                label: "Send sign-in link",
+                onClick: () => {
+                  formRef.current?.requestSubmit();
+                },
+                disabled: loading,
+              }}
+              helperText="No password needed."
+            />
           </form>
         ) : (
           <p className="text-sm sj-text-muted">

@@ -11,6 +11,7 @@ import { FundingCta } from "@/components/FundingCta";
 import { PushReminderToggle } from "@/components/PushReminderToggle";
 import { TodayCardRenderer } from "@/components/TodayCardRenderer";
 import { BaseChip } from "@/components/Badges";
+import { StashStatusLine } from "@/components/StashStatusLine";
 import { sortTodayCards } from "@/lib/todayOrder";
 
 function fmt(cents: number) {
@@ -526,7 +527,13 @@ function HomeContent() {
             <p className="font-semibold mt-1">🔥 {streak?.currentStreakDays ?? 0}d</p>
           </div>
         </div>
-        {status && <div className="text-sm sj-text-muted">{status}</div>}
+        {status && (
+          <StashStatusLine
+            tone="muted"
+            compact
+            text={status}
+          />
+        )}
       </section>
 
       {userId && actions.canPushReminders && (
