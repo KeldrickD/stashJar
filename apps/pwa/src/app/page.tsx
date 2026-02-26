@@ -493,29 +493,6 @@ function HomeContent() {
         </div>
       )}
 
-      {!userId && status !== "Loading…" && (
-        <section className="sj-card-soft p-7 sm:p-8 space-y-6 sj-appear">
-          <header className="space-y-2">
-            <p className="text-xs tracking-[0.18em] uppercase text-emerald-700/80 font-semibold">
-              StashJar
-            </p>
-            <h1 className="text-3xl font-semibold tracking-tight">Build your savings habit.</h1>
-            <p className="text-sm sj-text-muted">
-              Small daily actions. Real money saved. No friction.
-            </p>
-          </header>
-          <ConnectWallet returnTo={pathname && pathname !== "/" ? pathname : null} onError={setToastMsg} />
-        </section>
-      )}
-
-      {!userId && status !== "Loading…" && (
-        <footer className="text-xs sj-text-faint pb-8">
-          Connect your wallet to continue.
-        </footer>
-      )}
-
-      {userId !== null && (
-        <div className="contents">
       <header className="flex items-start justify-between gap-3">
         <div>
           <p className="text-xs tracking-[0.16em] uppercase font-semibold text-emerald-700/80">StashJar</p>
@@ -551,6 +528,11 @@ function HomeContent() {
             <p className="font-semibold mt-1">🔥 {streak?.currentStreakDays ?? 0}d</p>
           </div>
         </div>
+        {!userId && status !== "Loading…" && (
+          <div className="pt-2">
+            <ConnectWallet returnTo={pathname && pathname !== "/" ? pathname : null} onError={setToastMsg} />
+          </div>
+        )}
         {status && (
           <StashStatusLine
             tone="muted"
@@ -658,6 +640,9 @@ function HomeContent() {
           <h2 className="text-xl font-semibold">Manage Funds</h2>
           <p className="text-sm sj-text-muted mt-1">Move money in and out of your vault.</p>
         </div>
+        {!userId ? (
+          <p className="text-sm sj-text-muted">Connect your wallet above to add or withdraw.</p>
+        ) : (
         <div className="grid grid-cols-2 gap-2">
           <button
             type="button"
@@ -674,6 +659,7 @@ function HomeContent() {
             Withdraw
           </button>
         </div>
+        )}
       </section>
 
       {userId && (
@@ -803,8 +789,6 @@ function HomeContent() {
           </>
         )}
       </footer>
-        </div>
-      )}
     </main>
   );
 }

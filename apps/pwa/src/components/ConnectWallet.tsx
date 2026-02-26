@@ -52,12 +52,18 @@ export function ConnectWallet({ returnTo, onError }: Props) {
       })) as string;
 
       const verifyRes = await api.walletAuthVerify(address, message, signature, returnPath);
-      const redirect = verifyRes.returnTo && verifyRes.returnTo.startsWith("/") ? verifyRes.returnTo : "/";
-      window.top?.location.replace(redirect);
+      const path = verifyRes.returnTo && verifyRes.returnTo.startsWith("/") ? verifyRes.returnTo : "/";
+      const redirectUrl = path.startsWith("http") ? path : `${window.location.origin}${path}`;
+      try {
+        (window.top || window).location.href = redirectUrl;
+      } catch {
+        window.location.href = redirectUrl;
+      }
       return;
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Connect failed.";
-      onError?.(msg);
+      const toShow = msg.length > 80 ? "Backend error. Check that NEXT_PUBLIC_API_BASE is set and the API is running." : msg;
+      onError?.(toShow);
     } finally {
       setLoading(false);
     }
