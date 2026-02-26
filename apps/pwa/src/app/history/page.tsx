@@ -13,7 +13,6 @@ function fmt(cents: number) {
 
 export default function HistoryPage() {
   const router = useRouter();
-  const pathname = usePathname();
   const [items, setItems] = useState<Array<{ occurredAt: string; type: string; amountCents: number; memo?: string }>>([]);
   const [status, setStatus] = useState("");
 
@@ -35,7 +34,7 @@ export default function HistoryPage() {
         setStatus("");
       }
     })();
-  }, [router, pathname]);
+  }, [router]);
 
   return (
     <main className="mx-auto max-w-xl px-4 py-6 space-y-6">
