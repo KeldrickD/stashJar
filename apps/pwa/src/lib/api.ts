@@ -1,6 +1,12 @@
 const API = process.env.NEXT_PUBLIC_API_BASE ?? "";
-/** Normalized base URL (no trailing slash). Use HTTPS in production to avoid Railway redirect turning POST into GET (405). */
-const API_BASE = API ? API.replace(/\/+$/, "") : "";
+/** Normalized base URL: no trailing slash, always absolute (prepend https:// if missing). */
+function normalizeApiBase(raw: string): string {
+  const trimmed = raw.replace(/\/+$/, "").trim();
+  if (!trimmed) return "";
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `https://${trimmed}`;
+}
+const API_BASE = normalizeApiBase(API);
 
 const BAD_API = !API_BASE || API_BASE.includes("__SET_ME__");
 
@@ -13,7 +19,7 @@ function ensureApiBase(): string {
       "Backend URL not configured. In Vercel (or your host), set NEXT_PUBLIC_API_BASE to your ledger-service URL (e.g. https://your-api.railway.app) and redeploy.",
     );
   }
-  // Railway (and many proxies) redirect HTTP→HTTPS; following that redirect can turn POST into GET and cause 405. Use HTTPS when the page is HTTPS.
+  // Railway (and many proxies) redirect HTTP→HTTPS; following that redirect can turn POST into GET and cause 405.
   if (typeof window !== "undefined" && (window as Window & { location?: { protocol?: string } }).location?.protocol === "https:" && API_BASE.toLowerCase().startsWith("http://")) {
     return "https://" + API_BASE.slice(7);
   }

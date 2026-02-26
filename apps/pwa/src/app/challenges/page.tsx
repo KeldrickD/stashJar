@@ -81,7 +81,11 @@ export default function ChallengesPage() {
           router.replace("/");
           return;
         }
-        setError(msg);
+        // Avoid rendering 404/405 HTML response bodies as raw text
+        const safeMsg = typeof msg === "string" && msg.length > 200
+          ? "Backend error or wrong API URL. Check NEXT_PUBLIC_API_BASE (use https://...)."
+          : msg;
+        setError(safeMsg);
       } finally {
         setLoadingUser(false);
       }
