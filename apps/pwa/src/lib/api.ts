@@ -1,4 +1,18 @@
-const API = process.env.NEXT_PUBLIC_API_BASE!;
+const API = process.env.NEXT_PUBLIC_API_BASE ?? "";
+
+const BAD_API = !API || API.includes("__SET_ME__");
+
+/** Use this in the UI to show a "configure backend" message instead of broken requests. */
+export const isApiConfigured = (): boolean => !BAD_API;
+
+function ensureApiBase(): string {
+  if (BAD_API) {
+    throw new Error(
+      "Backend URL not configured. In Vercel (or your host), set NEXT_PUBLIC_API_BASE to your ledger-service URL (e.g. https://your-api.railway.app) and redeploy.",
+    );
+  }
+  return API;
+}
 
 const fetchOpts = (method: string, body?: unknown): RequestInit => ({
   method,
@@ -9,7 +23,8 @@ const fetchOpts = (method: string, body?: unknown): RequestInit => ({
 });
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${API}${path}`, fetchOpts(method, body));
+  const base = ensureApiBase();
+  const res = await fetch(`${base}${path}`, fetchOpts(method, body));
 
   const text = await res.text();
   let data: unknown;
