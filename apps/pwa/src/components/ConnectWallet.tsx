@@ -5,12 +5,13 @@ import { usePathname } from "next/navigation";
 import { api } from "@/lib/api";
 import { StashActionGroup } from "./StashActionGroup";
 
-declare global {
-  interface Window {
-    ethereum?: {
-      request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
-    };
-  }
+type EthereumProvider = {
+  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+};
+
+function getEthereum(): EthereumProvider | undefined {
+  if (typeof window === "undefined") return undefined;
+  return (window as unknown as { ethereum?: EthereumProvider }).ethereum;
 }
 
 type Props = {
@@ -25,13 +26,14 @@ export function ConnectWallet({ returnTo, onError }: Props) {
   const returnPath = returnTo ?? (pathname && pathname !== "/" ? pathname : null);
 
   async function handleConnect() {
-    if (typeof window === "undefined" || !window.ethereum) {
+    const ethereum = getEthereum();
+    if (!ethereum) {
       onError?.("No wallet found. Install Coinbase Wallet or MetaMask.");
       return;
     }
     setLoading(true);
     try {
-      const accounts = (await window.ethereum.request({
+      const accounts = (await ethereum.request({
         method: "eth_requestAccounts",
         params: [],
       })) as string[];
@@ -44,7 +46,7 @@ export function ConnectWallet({ returnTo, onError }: Props) {
       const nonceRes = await api.walletAuthNonce(address, returnPath);
       const message = nonceRes.message;
 
-      const signature = (await window.ethereum.request({
+      const signature = (await ethereum.request({
         method: "personal_sign",
         params: [message, address],
       })) as string;
