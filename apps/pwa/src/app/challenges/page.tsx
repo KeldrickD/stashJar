@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter, usePathname } from "next/navigation";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   api,
@@ -79,8 +79,7 @@ export default function ChallengesPage() {
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : "Failed to initialize user";
         if (msg === "unauthorized") {
-          const returnTo = pathname ? encodeURIComponent(pathname) : "";
-          router.replace(returnTo ? `/login?returnTo=${returnTo}` : "/login");
+          router.replace("/");
           return;
         }
         setError(msg);

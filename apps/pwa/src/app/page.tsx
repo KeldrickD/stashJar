@@ -236,8 +236,8 @@ function HomeContent() {
           saveUserId(uid);
         } catch {
           if (!alive) return;
-          const returnTo = pathname ? encodeURIComponent(pathname) : "";
-          router.replace(returnTo ? `/login?returnTo=${returnTo}` : "/login");
+          setUser(null);
+          setStatus("");
           return;
         }
 
@@ -446,7 +446,7 @@ function HomeContent() {
       await api.logout();
     } catch {}
     clearUserId();
-    router.replace("/login");
+    router.replace("/");
   }
 
   useEffect(() => {
@@ -779,6 +779,8 @@ function HomeContent() {
           </>
         )}
       </footer>
+        </>
+      )}
     </main>
   );
 }

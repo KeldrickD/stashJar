@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter, usePathname } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { setUserId } from "@/lib/session";
 
@@ -28,8 +28,7 @@ export default function HistoryPage() {
         setItems(res.transactions ?? []);
       } catch (e: unknown) {
         if (e instanceof Error && e.message === "unauthorized") {
-          const returnTo = pathname ? encodeURIComponent(pathname) : "";
-          router.replace(returnTo ? `/login?returnTo=${returnTo}` : "/login");
+          router.replace("/");
           return;
         }
       } finally {
