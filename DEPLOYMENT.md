@@ -56,6 +56,8 @@
 - **Migrations:** Run `npx prisma migrate deploy` once (or set as Railway **Release Command**).
 - **PWA:** In Vercel set `NEXT_PUBLIC_API_BASE` to the Railway API URL (no trailing slash) and redeploy.
 
+**Important:** Use **HTTPS** for the API URL (e.g. `https://your-app.up.railway.app`). If you use `http://`, Railway’s proxy redirects to HTTPS and the browser may convert POST to GET when following the redirect, causing **405 Method Not Allowed** on `/auth/wallet/nonce` and connect-wallet failures.
+
 Full step-by-step: **SETUP.md**.
 
 ---
@@ -83,6 +85,8 @@ Ensure:
 Before go-live:
 
 - [ ] `/health` returns OK
+- [ ] `GET /auth/health` returns `{ "ok": true }` (confirms auth routes are reachable)
+- [ ] `POST /auth/wallet/nonce` works from the PWA origin (if 405, check API URL uses HTTPS and no proxy is converting POST to GET)
 - [ ] `/debug/health/chain` returns OK
 - [ ] Funding refresh works
 - [ ] Withdraw path works (POWER)

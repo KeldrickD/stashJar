@@ -62,7 +62,18 @@ export function ConnectWallet({ returnTo, onError }: Props) {
       return;
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Connect failed.";
-      const toShow = msg.length > 80 ? "Backend error. Check that NEXT_PUBLIC_API_BASE is set and the API is running." : msg;
+      const s = String(msg).toLowerCase();
+      const is404405 =
+        s.includes("404") ||
+        s.includes("405") ||
+        s.includes("method not allowed") ||
+        s.includes("not found") ||
+        s.includes("failed to fetch");
+      const toShow = is404405
+        ? "Backend unreachable or method not allowed. Check NEXT_PUBLIC_API_BASE and that the API allows POST (no proxy blocking)."
+        : msg.length > 80
+          ? "Backend error. Check that NEXT_PUBLIC_API_BASE is set and the API is running."
+          : msg;
       onError?.(toShow);
     } finally {
       setLoading(false);

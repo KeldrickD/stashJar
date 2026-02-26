@@ -91,6 +91,8 @@ const app = Fastify({ logger: true });
 await app.register(cors, {
   origin: env.data.APP_ORIGIN ? [env.data.APP_ORIGIN] : true,
   credentials: true,
+  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-User-Id", "X-App-Context"],
 });
 
 app.addHook("onRequest", async (request: any) => {
@@ -1189,6 +1191,9 @@ registerWalletAuthRoutes(app, {
   getClientIP,
   sanitizeReturnTo,
 });
+
+// Allow clients to verify auth base path is reachable (GET so proxies/caches don't block)
+app.get("/auth/health", async () => ({ ok: true }));
 
 app.post("/auth/start", async (req, reply) => {
   const ip = getClientIP(req);

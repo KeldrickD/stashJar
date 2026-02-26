@@ -1,6 +1,8 @@
 const API = process.env.NEXT_PUBLIC_API_BASE ?? "";
+/** Normalized base URL (no trailing slash). Use HTTPS in production to avoid Railway redirect turning POST into GET (405). */
+const API_BASE = API ? API.replace(/\/+$/, "") : "";
 
-const BAD_API = !API || API.includes("__SET_ME__");
+const BAD_API = !API_BASE || API_BASE.includes("__SET_ME__");
 
 /** Use this in the UI to show a "configure backend" message instead of broken requests. */
 export const isApiConfigured = (): boolean => !BAD_API;
@@ -11,7 +13,11 @@ function ensureApiBase(): string {
       "Backend URL not configured. In Vercel (or your host), set NEXT_PUBLIC_API_BASE to your ledger-service URL (e.g. https://your-api.railway.app) and redeploy.",
     );
   }
-  return API;
+  // Railway (and many proxies) redirect HTTP→HTTPS; following that redirect can turn POST into GET and cause 405. Use HTTPS when the page is HTTPS.
+  if (typeof window !== "undefined" && (window as Window & { location?: { protocol?: string } }).location?.protocol === "https:" && API_BASE.toLowerCase().startsWith("http://")) {
+    return "https://" + API_BASE.slice(7);
+  }
+  return API_BASE;
 }
 
 const fetchOpts = (method: string, body?: unknown): RequestInit => ({
@@ -24,7 +30,8 @@ const fetchOpts = (method: string, body?: unknown): RequestInit => ({
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const base = ensureApiBase();
-  const res = await fetch(`${base}${path}`, fetchOpts(method, body));
+  const url = `${base}${path.startsWith("/") ? path : `/${path}`}`;
+  const res = await fetch(url, fetchOpts(method, body));
 
   const text = await res.text();
   let data: unknown;
@@ -414,7 +421,9 @@ export const api = {
     }),
 
   getMe: async (): Promise<AuthMe> => {
-    const res = await fetch(`${API}/auth/me`, fetchOpts("GET"));
+    const base = ensureApiBase();
+    const url = `${base}/auth/me`;
+    const res = await fetch(url, fetchOpts("GET"));
     if (res.status === 401) throw new Error("unauthorized");
     const text = await res.text();
     let data: unknown;
@@ -660,7 +669,7 @@ export const api = {
     ),
 
   getVapidPublicKey: () =>
-    fetch(`${API}/push/vapid-public`, { credentials: "include" }).then(async (r) => {
+    fetch(`${ensureApiBase()}/push/vapid-public`, { credentials: "include" }).then(async (r) => {
       if (!r.ok) throw new Error("Push not configured");
       const d = await r.json();
       return d.vapidPublicKey as string;
