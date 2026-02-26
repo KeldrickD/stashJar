@@ -86,7 +86,7 @@ export default function ChallengesPage() {
         setLoadingUser(false);
       }
     })();
-  }, [router, pathname]);
+  }, [router]);
 
   async function start(slug: string) {
     if (!userId) return;
