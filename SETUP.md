@@ -53,8 +53,10 @@ Follow this to get the PWA and API running end-to-end (Vercel + Railway + Postgr
 
 ### 1.4 Deploy and check
 
-- Push to the connected branch or trigger a deploy. Build runs: `npm ci && npm run build`; start: `npm start`.
+- Push to the connected branch or trigger a deploy. Build runs; start: `npm start`.
 - Open `https://YOUR-API-URL/health` – you should see `{"ok":true}`.
+
+**If the service crashes after deploy:** Check **Railway → ledger-service → Logs** for the error. Often it’s a missing variable: ensure `DATABASE_URL`, `AUTH_PEPPER`, `APP_ORIGIN`, and `API_ORIGIN` are all set. Generate a domain in **Settings → Networking** if the service is “Unexposed”.
 
 ---
 

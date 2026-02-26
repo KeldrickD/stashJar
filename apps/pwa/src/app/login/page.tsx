@@ -2,7 +2,7 @@
 
 import { Suspense, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { api } from "@/lib/api";
+import { api, isApiConfigured } from "@/lib/api";
 import { StashActionGroup } from "@/components/StashActionGroup";
 
 function sanitizeReturnTo(value: string | null): string | null {
@@ -39,12 +39,6 @@ function LoginContent() {
 
   return (
     <main className="min-h-screen px-4 py-10">
-      {!isApiConfigured() && (
-        <div className="mx-auto max-w-md mb-4 p-4 rounded-lg bg-amber-100 text-amber-900 text-sm">
-          Backend URL not set. In Vercel → Project Settings → Environment Variables, add{" "}
-          <code className="font-mono text-xs">NEXT_PUBLIC_API_BASE</code> with your ledger-service URL, then redeploy.
-        </div>
-      )}
       <div className="mx-auto max-w-md sj-card-soft p-7 sm:p-8 space-y-6">
         <header className="space-y-2">
           <p className="text-xs tracking-[0.18em] uppercase text-emerald-700/80 font-semibold">
