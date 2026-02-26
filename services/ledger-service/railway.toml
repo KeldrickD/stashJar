@@ -1,9 +1,10 @@
 # Railway deployment for ledger-service
 # In Railway: set "Root Directory" to services/ledger-service
+# Uses Dockerfile for Node 22.12+ (Prisma 7 requirement). Remove or rename Dockerfile to use Nixpacks.
 
 [build]
-builder = "nixpacks"
-buildCommand = "npm ci && npm run build"
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "npm start"
