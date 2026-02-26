@@ -63,7 +63,8 @@ Follow this to get the PWA and API running end-to-end (Vercel + Railway + Postgr
 ### 2.1 Deploy the app
 
 1. In [Vercel](https://vercel.com), import this repo (or use the existing stashjar project).
-2. **Root Directory:** Set to `apps/pwa` (if the project uses the monorepo root, set it in the project settings).
+2. **Root Directory (required):** In **Settings** → **General** → **Root Directory**, set to **`apps/pwa`**.  
+   If this is left blank, Vercel builds from the monorepo root and will fail with “No Next.js version detected” because the root `package.json` does not include `next`. The PWA lives in `apps/pwa`.
 3. Build and deploy. The app will be at e.g. `https://stashjar.vercel.app`.
 
 ### 2.2 Point the PWA at your API
