@@ -6,6 +6,7 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { api, getRetryInfo, type FeatureActions, TodayCard, TodayBanner } from "@/lib/api";
 import { setUserId as saveUserId, clearUserId } from "@/lib/session";
 import { ApplyMissedSavesBanner } from "@/components/ApplyMissedSavesBanner";
+import { ConnectWallet } from "@/components/ConnectWallet";
 import { DailyLimitCountdown } from "@/components/DailyLimitCountdown";
 import { FundingCta } from "@/components/FundingCta";
 import { PushReminderToggle } from "@/components/PushReminderToggle";
@@ -492,6 +493,29 @@ function HomeContent() {
         </div>
       )}
 
+      {!userId && status !== "Loading…" && (
+        <section className="sj-card-soft p-7 sm:p-8 space-y-6 sj-appear">
+          <header className="space-y-2">
+            <p className="text-xs tracking-[0.18em] uppercase text-emerald-700/80 font-semibold">
+              StashJar
+            </p>
+            <h1 className="text-3xl font-semibold tracking-tight">Build your savings habit.</h1>
+            <p className="text-sm sj-text-muted">
+              Small daily actions. Real money saved. No friction.
+            </p>
+          </header>
+          <ConnectWallet returnTo={pathname && pathname !== "/" ? pathname : null} onError={setToastMsg} />
+        </section>
+      )}
+
+      {!userId && status !== "Loading…" && (
+        <footer className="text-xs sj-text-faint pb-8">
+          Connect your wallet to continue.
+        </footer>
+      )}
+
+      {userId !== null && (
+        <div className="contents">
       <header className="flex items-start justify-between gap-3">
         <div>
           <p className="text-xs tracking-[0.16em] uppercase font-semibold text-emerald-700/80">StashJar</p>
@@ -779,7 +803,7 @@ function HomeContent() {
           </>
         )}
       </footer>
-        </>
+        </div>
       )}
     </main>
   );
