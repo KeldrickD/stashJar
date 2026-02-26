@@ -321,15 +321,19 @@ const COOKIE_OPTS = {
   secure: process.env.NODE_ENV === "production",
 };
 
-function setSessionCookie(reply: any, value: string, maxAgeDays: number): void {
+/** When request has Origin === APP_ORIGIN, use SameSite=None so cookie is sent on cross-origin fetch from PWA. */
+function setSessionCookie(reply: any, value: string, maxAgeDays: number, request?: any): void {
+  const origin = (request?.headers?.origin as string) ?? "";
+  const appOrigin = (env.data.APP_ORIGIN ?? "").trim();
+  const crossOrigin = !!appOrigin && origin === appOrigin;
   const parts = [
     `${COOKIE_NAME}=${encodeURIComponent(value)}`,
     "Path=/",
     "HttpOnly",
-    "SameSite=Lax",
+    crossOrigin ? "SameSite=None" : "SameSite=Lax",
     `Max-Age=${maxAgeDays * 24 * 60 * 60}`,
   ];
-  if (COOKIE_OPTS.secure) parts.push("Secure");
+  if (COOKIE_OPTS.secure || crossOrigin) parts.push("Secure");
   reply.header("Set-Cookie", parts.join("; "));
 }
 
@@ -1289,7 +1293,7 @@ app.get("/auth/callback", async (req, reply) => {
   });
   const successPath = `/auth/success?returnTo=${encodeURIComponent(returnToPath)}`;
   const redirectTo = APP_ORIGIN ? `${APP_ORIGIN}${successPath}` : successPath;
-  setSessionCookie(reply, rawSession, SESSION_TTL_DAYS);
+  setSessionCookie(reply, rawSession, SESSION_TTL_DAYS, req);
   return reply.redirect(302, redirectTo);
 });
 

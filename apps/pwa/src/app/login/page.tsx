@@ -16,10 +16,63 @@ type Eip1193Provider = {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
 };
 
+/** Prefer window.ethereum; fallback to coinbaseWalletExtension for some in-app browsers. */
 function getEthereumProvider(): Eip1193Provider | null {
   if (typeof window === "undefined") return null;
-  const provider = (window as Window & { ethereum?: Eip1193Provider }).ethereum;
-  return provider ?? null;
+  const w = window as Window & {
+    ethereum?: Eip1193Provider;
+    coinbaseWalletExtension?: Eip1193Provider;
+  };
+  return w.ethereum ?? w.coinbaseWalletExtension ?? null;
+}
+
+/** Resolve provider, optionally waiting for late injection (e.g. in-app browsers). */
+function getEthereumProviderWithWait(): Promise<Eip1193Provider | null> {
+  const p = getEthereumProvider();
+  if (p) return Promise.resolve(p);
+  return new Promise((resolve) => {
+    const deadline = Date.now() + 1500;
+    const check = () => {
+      const provider = getEthereumProvider();
+      if (provider) {
+        resolve(provider);
+        return;
+      }
+      if (Date.now() < deadline) {
+        setTimeout(check, 150);
+      } else {
+        resolve(null);
+      }
+    };
+    setTimeout(check, 150);
+  });
+}
+
+function getOpenInWalletUrl(): string {
+  if (typeof window === "undefined") return "#";
+  const url = encodeURIComponent(window.location.href);
+  return `https://go.cb-w.com/dapp?url=${url}`;
+}
+
+function isMobileUserAgent(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent.toLowerCase();
+  return /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(ua);
+}
+
+/** Full URL for redirect; use top frame so we break out of iframes (in-app browsers). */
+function redirectTo(path: string): void {
+  const base = typeof window !== "undefined" ? window.location.origin : "";
+  const target = path.startsWith("http") ? path : `${base}${path.startsWith("/") ? path : `/${path}`}`;
+  try {
+    if (window.top && window.top !== window) {
+      window.top.location.replace(target);
+    } else {
+      window.location.replace(target);
+    }
+  } catch {
+    window.location.href = target;
+  }
 }
 
 function LoginContent() {
@@ -33,6 +86,7 @@ function LoginContent() {
   const [walletLoading, setWalletLoading] = useState(false);
   const [walletInfo, setWalletInfo] = useState<string | null>(null);
   const [embedded, setEmbedded] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
   const formRef = useRef<HTMLFormElement | null>(null);
   const autoAttemptedRef = useRef(false);
   const miniappMode = useMemo(() => context === "miniapp" || embedded, [context, embedded]);
@@ -43,23 +97,29 @@ function LoginContent() {
     } catch {
       setEmbedded(true);
     }
+    setIsMobile(isMobileUserAgent());
   }, []);
 
   const signInWithWallet = useCallback(async ({ auto = false }: { auto?: boolean } = {}) => {
-    const provider = getEthereumProvider();
+    setWalletLoading(true);
+    setError(null);
+    setWalletInfo(auto ? "Connecting…" : null);
+
+    const provider = await getEthereumProviderWithWait();
     if (!provider) {
-      if (!auto) setError("No wallet detected in this browser.");
+      setWalletLoading(false);
+      if (!auto) setError("No wallet detected. Use the link below to open in a wallet browser, or sign in with email.");
+      setWalletInfo(auto ? "No wallet here. Open in Coinbase Wallet or use email." : null);
       return;
     }
 
-    setError(null);
-    setWalletLoading(true);
-    setWalletInfo(auto ? "Trying wallet sign-in..." : null);
+    setWalletInfo(auto ? "Trying wallet sign-in…" : "Connecting…");
     try {
       const accounts = await provider.request({ method: "eth_requestAccounts" });
       const address = Array.isArray(accounts) ? String(accounts[0] ?? "") : "";
       if (!address) throw new Error("No wallet account selected.");
 
+      setWalletInfo("Sign the message in your wallet…");
       const nonce = await api.walletAuthNonce(address, returnTo);
       let signature: string;
       try {
@@ -74,13 +134,15 @@ function LoginContent() {
         })) as string;
       }
 
+      setWalletInfo("Signing you in…");
       const verified = await api.walletAuthVerify(address, nonce.message, signature, returnTo);
-      const target = sanitizeReturnTo(verified.returnTo) ?? returnTo ?? "/";
-      window.location.assign(target);
+      const path = sanitizeReturnTo(verified.returnTo) ?? returnTo ?? "/";
+      // Short delay so the browser can persist the Set-Cookie from the verify response before we navigate.
+      setTimeout(() => redirectTo(path), 150);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Wallet sign-in failed. Please try again.";
+      const message = err instanceof Error ? err.message : "Wallet sign-in failed. Try again or use email.";
       if (!auto) setError(message);
-      setWalletInfo(auto ? "Auto sign-in unavailable. Use wallet or email below." : null);
+      setWalletInfo(auto ? "Use wallet or email below." : null);
     } finally {
       setWalletLoading(false);
     }
@@ -108,6 +170,8 @@ function LoginContent() {
     }
   }
 
+  const showOpenInWallet = isMobile && !getEthereumProvider();
+
   return (
     <main className="min-h-screen px-4 py-10">
       <div className="mx-auto max-w-md sj-card-soft p-7 sm:p-8 space-y-6">
@@ -120,7 +184,7 @@ function LoginContent() {
             Small daily actions. Real money saved. No friction.
           </p>
           {miniappMode && (
-            <p className="text-xs sj-text-faint">Miniapp mode detected. Wallet sign-in is preferred.</p>
+            <p className="text-xs sj-text-faint">Miniapp mode: wallet sign-in is preferred.</p>
           )}
         </header>
 
@@ -131,13 +195,20 @@ function LoginContent() {
               loading={walletLoading}
               primary={{
                 label: "Sign in with wallet",
-                onClick: () => {
-                  void signInWithWallet();
-                },
+                onClick: () => void signInWithWallet(),
                 disabled: walletLoading || loading,
               }}
-              helperText={walletInfo ?? "Best for miniapp: one tap, no inbox required."}
+              helperText={walletInfo ?? "Use your wallet to sign in — no password."}
             />
+            {showOpenInWallet && (
+              <p className="text-xs sj-text-faint">
+                No wallet in this browser.{" "}
+                <a href={getOpenInWalletUrl()} target="_blank" rel="noopener noreferrer" className="sj-link underline">
+                  Open in Coinbase Wallet
+                </a>{" "}
+                to sign in with your wallet.
+              </p>
+            )}
             <div className="pt-1">
               <p className="text-xs sj-text-faint">or use email</p>
             </div>
@@ -167,9 +238,7 @@ function LoginContent() {
               loading={loading}
               primary={{
                 label: "Send sign-in link",
-                onClick: () => {
-                  formRef.current?.requestSubmit();
-                },
+                onClick: () => formRef.current?.requestSubmit(),
                 disabled: loading || walletLoading,
               }}
               helperText="No password needed."

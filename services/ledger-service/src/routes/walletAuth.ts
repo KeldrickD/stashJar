@@ -10,7 +10,7 @@ type WalletAuthDeps = {
   SESSION_TTL_DAYS: number;
   hashWithPepper: (value: string) => string;
   generateRawSession: () => string;
-  setSessionCookie: (reply: any, rawSession: string, ttlDays: number) => void;
+  setSessionCookie: (reply: any, rawSession: string, ttlDays: number, request?: any) => void;
   getClientIP: (req: any) => string;
   sanitizeReturnTo: (value?: string | null) => string | null;
 };
@@ -131,7 +131,7 @@ export function registerWalletAuthRoutes(app: FastifyInstance, deps: WalletAuthD
         userAgent: (req.headers["user-agent"] as string) ?? undefined,
       },
     });
-    deps.setSessionCookie(reply, rawSession, deps.SESSION_TTL_DAYS);
+    deps.setSessionCookie(reply, rawSession, deps.SESSION_TTL_DAYS, req);
 
     const returnTo =
       deps.sanitizeReturnTo(parsed.data.returnTo) ?? deps.sanitizeReturnTo(nonceRow.returnTo ?? undefined) ?? "/";
