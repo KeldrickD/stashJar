@@ -1,4 +1,7 @@
-# Force npm for this service (repo root uses pnpm; we use package-lock.json here)
+# Force npm and Node 20 (Prisma 7 requires Node 20.19+)
+[phases.setup]
+nixPkgs = ["nodejs_20"]
+
 [phases.install]
 cmds = ["npm ci"]
 
