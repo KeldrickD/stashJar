@@ -37,7 +37,6 @@ function challengeIcon(slug: string | null): string {
 
 export default function ChallengesPage() {
   const router = useRouter();
-  const pathname = usePathname();
   const [userId, setUserId] = useState<string | null>(null);
   const [status, setStatus] = useState("");
   const [activeChallengeId, setActiveChallengeId] = useState<string>("");
