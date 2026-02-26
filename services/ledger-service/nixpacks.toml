@@ -1,6 +1,6 @@
-# Force npm and Node 20 (Prisma 7 requires Node 20.19+)
+# Force npm and Node 22 (Prisma 7 requires 20.19+, 22.12+, or 24+; nodejs_20 can be 20.18.x)
 [phases.setup]
-nixPkgs = ["nodejs_20"]
+nixPkgs = ["nodejs_22"]
 
 [phases.install]
 cmds = ["npm ci"]
