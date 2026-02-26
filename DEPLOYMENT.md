@@ -53,6 +53,7 @@
 - **Build:** `npm ci && npm run build` (see `services/ledger-service/railway.toml`)
 - **Start:** `npm start`
 - **Env:** Set `DATABASE_URL`, `AUTH_PEPPER`, `APP_ORIGIN`, `API_ORIGIN` (and optional Resend, CDP, VAPID). Link Postgres in the same project to get `DATABASE_URL`.
+- **APP_ORIGIN:** Must be your PWA origin (e.g. `https://stashjar.vercel.app`). Trailing slash is normalized; CORS and cookies use this to allow the frontend.
 - **Migrations:** Run `npx prisma migrate deploy` once (or set as Railway **Release Command**).
 - **PWA:** In Vercel set `NEXT_PUBLIC_API_BASE` to the Railway API URL (no trailing slash) and redeploy.
 
