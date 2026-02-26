@@ -89,7 +89,8 @@ const prisma = new PrismaClient({ adapter });
 const app = Fastify({ logger: true });
 
 await app.register(cors, {
-  origin: env.data.APP_ORIGIN ? [env.data.APP_ORIGIN] : true,
+  // Normalize to no trailing slash so browser Origin (e.g. https://stashjar.vercel.app) matches
+  origin: env.data.APP_ORIGIN ? [env.data.APP_ORIGIN.replace(/\/+$/, "").trim()] : true,
   credentials: true,
   methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "X-User-Id", "X-App-Context"],
@@ -326,7 +327,7 @@ const COOKIE_OPTS = {
 /** When request has Origin === APP_ORIGIN, use SameSite=None so cookie is sent on cross-origin fetch from PWA. */
 function setSessionCookie(reply: any, value: string, maxAgeDays: number, request?: any): void {
   const origin = (request?.headers?.origin as string) ?? "";
-  const appOrigin = (env.data.APP_ORIGIN ?? "").trim();
+  const appOrigin = (env.data.APP_ORIGIN ?? "").trim().replace(/\/+$/, "");
   const crossOrigin = !!appOrigin && origin === appOrigin;
   const parts = [
     `${COOKIE_NAME}=${encodeURIComponent(value)}`,
